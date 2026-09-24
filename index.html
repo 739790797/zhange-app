@@ -2,46 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="/src/styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>战鸽助手</title>
-    <script type="module" src="/src/main.ts" defer></script>
   </head>
-  <body>
-    <aside class="side">
-      <header>
-        <strong>战鸽助手</strong>
-        <span id="site-label"></span>
-      </header>
-      <nav id="nav"></nav>
-      <section>
-        <h2>站点</h2>
-        <form id="site-form">
-          <input id="site-input" type="url" spellcheck="false" aria-label="站点地址" />
-          <button type="submit">保存</button>
-        </form>
-      </section>
-      <section>
-        <h2>显示</h2>
-        <label>伽马 <input id="gamma" type="range" min="0.6" max="2.2" step="0.05" /></label>
-        <label>明暗 <input id="brightness" type="range" min="0.5" max="1.5" step="0.05" /></label>
-        <p id="display-readout"></p>
-        <div class="row">
-          <button id="apply" type="button">套用</button>
-          <button id="restore" type="button">恢复</button>
-        </div>
-        <p class="hint">游戏中按 Ctrl+Alt+G 切换。退出助手时恢复原来的伽马。</p>
-      </section>
-      <section>
-        <h2>塔科夫目录</h2>
-        <p id="shots-path" class="path">截图：未绑定</p>
-        <p id="logs-path" class="path">日志：未绑定</p>
-        <div class="row">
-          <button id="bind-shots" type="button">截图</button>
-          <button id="bind-logs" type="button">日志</button>
-        </div>
-      </section>
-      <p id="status" class="status" role="status"></p>
-    </aside>
-  </body>
+  <body></body>
 </html>
