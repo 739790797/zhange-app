@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-note-map"
+description = "Enables the overlay_note_map command without any pre-configured scope."
+commands.allow = ["overlay_note_map"]
+
+[[permission]]
+identifier = "deny-overlay-note-map"
+description = "Denies the overlay_note_map command without any pre-configured scope."
+commands.deny = ["overlay_note_map"]

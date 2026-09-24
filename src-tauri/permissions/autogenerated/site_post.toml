@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-post"
+description = "Enables the site_post command without any pre-configured scope."
+commands.allow = ["site_post"]
+
+[[permission]]
+identifier = "deny-site-post"
+description = "Denies the site_post command without any pre-configured scope."
+commands.deny = ["site_post"]

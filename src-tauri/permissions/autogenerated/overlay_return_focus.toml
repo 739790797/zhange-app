@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-return-focus"
+description = "Enables the overlay_return_focus command without any pre-configured scope."
+commands.allow = ["overlay_return_focus"]
+
+[[permission]]
+identifier = "deny-overlay-return-focus"
+description = "Denies the overlay_return_focus command without any pre-configured scope."
+commands.deny = ["overlay_return_focus"]

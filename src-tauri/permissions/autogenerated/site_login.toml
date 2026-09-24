@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-login"
+description = "Enables the site_login command without any pre-configured scope."
+commands.allow = ["site_login"]
+
+[[permission]]
+identifier = "deny-site-login"
+description = "Denies the site_login command without any pre-configured scope."
+commands.deny = ["site_login"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-raid-status"
+description = "Enables the raid_status command without any pre-configured scope."
+commands.allow = ["raid_status"]
+
+[[permission]]
+identifier = "deny-raid-status"
+description = "Denies the raid_status command without any pre-configured scope."
+commands.deny = ["raid_status"]

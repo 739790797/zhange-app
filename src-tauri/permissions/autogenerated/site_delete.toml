@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-delete"
+description = "Enables the site_delete command without any pre-configured scope."
+commands.allow = ["site_delete"]
+
+[[permission]]
+identifier = "deny-site-delete"
+description = "Denies the site_delete command without any pre-configured scope."
+commands.deny = ["site_delete"]

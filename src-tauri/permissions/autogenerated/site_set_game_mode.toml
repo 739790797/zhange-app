@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-set-game-mode"
+description = "Enables the site_set_game_mode command without any pre-configured scope."
+commands.allow = ["site_set_game_mode"]
+
+[[permission]]
+identifier = "deny-site-set-game-mode"
+description = "Denies the site_set_game_mode command without any pre-configured scope."
+commands.deny = ["site_set_game_mode"]

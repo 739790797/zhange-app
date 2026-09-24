@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-get"
+description = "Enables the site_get command without any pre-configured scope."
+commands.allow = ["site_get"]
+
+[[permission]]
+identifier = "deny-site-get"
+description = "Denies the site_get command without any pre-configured scope."
+commands.deny = ["site_get"]

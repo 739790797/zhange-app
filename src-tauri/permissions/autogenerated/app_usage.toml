@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-usage"
+description = "Enables the app_usage command without any pre-configured scope."
+commands.allow = ["app_usage"]
+
+[[permission]]
+identifier = "deny-app-usage"
+description = "Denies the app_usage command without any pre-configured scope."
+commands.deny = ["app_usage"]

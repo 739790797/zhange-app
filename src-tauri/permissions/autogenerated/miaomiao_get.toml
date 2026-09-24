@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miaomiao-get"
+description = "Enables the miaomiao_get command without any pre-configured scope."
+commands.allow = ["miaomiao_get"]
+
+[[permission]]
+identifier = "deny-miaomiao-get"
+description = "Denies the miaomiao_get command without any pre-configured scope."
+commands.deny = ["miaomiao_get"]
