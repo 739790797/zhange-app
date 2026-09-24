@@ -16,16 +16,8 @@ concurrency:
 
 jobs:
   exe:
-    name: ${{ matrix.asset }}
+    name: zhange-app.exe
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            asset: zhange-app-x64.exe
-          - target: i686-pc-windows-msvc
-            asset: zhange-app-x86.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +28,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: i686-pc-windows-msvc
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -45,20 +37,20 @@ jobs:
       - run: npm ci
 
       - name: Build single executable
-        run: npm run tauri build -- --no-bundle --target ${{ matrix.target }}
+        run: npm run tauri build -- --no-bundle --target i686-pc-windows-msvc
 
       - name: Collect executable
         shell: pwsh
         run: |
-          $src = "src-tauri/target/${{ matrix.target }}/release/zhange-app.exe"
+          $src = "src-tauri/target/i686-pc-windows-msvc/release/zhange-app.exe"
           if (-not (Test-Path $src)) { throw "找不到 $src" }
           New-Item -ItemType Directory -Force dist-exe | Out-Null
-          Copy-Item $src "dist-exe/${{ matrix.asset }}"
+          Copy-Item $src "dist-exe/zhange-app.exe"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: dist-exe/${{ matrix.asset }}
+          name: zhange-app.exe
+          path: dist-exe/zhange-app.exe
           if-no-files-found: error
 
   release:
@@ -73,8 +65,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: zhange-app-*
-          merge-multiple: true
+          name: zhange-app.exe
           path: dist-exe
 
       - name: Resolve tag
@@ -90,7 +81,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
-          files: dist-exe/*
+          files: dist-exe/zhange-app.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

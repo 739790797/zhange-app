@@ -24,4 +24,4 @@ npm run tauri dev
 
 也可以双击 `start.bat`。
 
-推送 `v*` 标签后，GitHub Actions 会打出 `zhange-app-x64.exe` 和 `zhange-app-x86.exe`，并挂到同名 Release。在 Actions 页手动运行 `build` 时，用 `src-tauri/tauri.conf.json` 里的版本号发布。
+推送 `v*` 标签后，GitHub Actions 会打出一份 32 位的 `zhange-app.exe`，并挂到同名 Release。这份程序在 32 位 Windows 上直接运行，在 64 位 Windows 上由系统的 32 位兼容层运行。在 Actions 页手动运行 `build` 时，用 `src-tauri/tauri.conf.json` 里的版本号发布。
