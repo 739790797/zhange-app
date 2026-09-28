@@ -3,6 +3,7 @@ mod logwatch;
 mod miaomiao;
 mod overlay;
 mod room_ws;
+mod shotwatch;
 mod site;
 
 use serde_json::Value;
@@ -30,6 +31,27 @@ fn room_unwatch() {
 }
 
 #[tauri::command]
+fn room_send(body: Value) -> Result<(), String> {
+    let text = serde_json::to_string(&body).map_err(|err| err.to_string())?;
+    room_ws::send(text)
+}
+
+#[tauri::command]
+fn shot_state() -> shotwatch::ShotState {
+    shotwatch::state()
+}
+
+#[tauri::command]
+fn shot_settings_get(app: tauri::AppHandle) -> shotwatch::ShotSettings {
+    shotwatch::settings(&app)
+}
+
+#[tauri::command]
+fn shot_settings_set(app: tauri::AppHandle, settings: shotwatch::ShotSettings) -> Result<shotwatch::ShotSettings, String> {
+    shotwatch::save_settings(&app, settings)
+}
+
+#[tauri::command]
 async fn site_session() -> Result<site::SiteUser, String> {
     site::restore().await
 }
@@ -47,6 +69,11 @@ async fn site_post(path: String, body: Value) -> Result<Value, String> {
 #[tauri::command]
 async fn site_put(path: String, body: Value) -> Result<Value, String> {
     site::put(path, body).await
+}
+
+#[tauri::command]
+async fn site_patch(path: String, body: Value) -> Result<Value, String> {
+    site::patch(path, body).await
 }
 
 #[tauri::command]
@@ -174,10 +201,15 @@ pub fn run() {
             site_get,
             site_post,
             site_put,
+            site_patch,
             site_delete,
             site_set_game_mode,
             room_watch,
             room_unwatch,
+            room_send,
+            shot_state,
+            shot_settings_get,
+            shot_settings_set,
             app_usage,
             paths_get,
             paths_set,
@@ -205,6 +237,7 @@ pub fn run() {
             miaomiao::init(app.handle());
             overlay::init(app.handle());
             logwatch::spawn(app.handle().clone());
+            shotwatch::spawn(app.handle().clone());
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
             let window = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("战鸽助手")

@@ -236,7 +236,7 @@ function paint() {
       <label class="map-task-check"><input type="checkbox" data-map-task-claim="${esc(task.id)}" ${claimed ? "checked" : ""} ${claimLocked ? "disabled" : ""} aria-label="选择 ${esc(task.name)}" /></label>
       <i class="map-task-swatch"${color ? ` style="background:${color}"` : " data-empty"}></i>
       ${icon ? `<img src="${esc(icon)}" alt="" />` : `<i class="map-task-icon"></i>`}
-      <strong data-map-task-title="${esc(task.id)}" title="${esc(task.onMap ? task.name : task.mapName || task.name)}">${esc(task.name)}</strong>
+      <strong><button type="button" data-wiki="task" data-wiki-id="${esc(task.id)}">${esc(task.name)}</button></strong>
       <select data-map-task="${esc(task.id)}" data-status="${status}" aria-label="${esc(task.name)} 状态">
         ${options.map((item) => `<option value="${item}"${item === status ? " selected" : ""}>${STATUS_LABEL[item]}</option>`).join("")}
       </select>

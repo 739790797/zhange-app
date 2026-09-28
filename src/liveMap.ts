@@ -1,6 +1,7 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import rawMaps from "./data/tarkov-dev-maps.json";
+import { loadOwnedKeyIds } from "./keys";
 import { floorForSpan, markerFloorBands, markerFloorDisplay, spanOnFloor, type FloorBand, type HeightPoint } from "./mapFloor";
 import {
   buildQuestOverlays,
@@ -17,6 +18,8 @@ import {
   questColor,
   questLabelHtml,
   questPeople,
+  setOwnedQuestKeys,
+  ownedKeyState,
   QUEST_OTHER_FLOOR,
   type QuestOverlay,
   type QuestPerson,
@@ -44,6 +47,21 @@ type MapLayer = {
 type MapGroup = { normalizedName: string; maps: MapLayer[] };
 
 type Point = HeightPoint & { name?: string | null; kind?: string | null; faction?: string | null };
+type MapPlace = {
+  id: string;
+  name: string;
+  kind: string;
+  x: number;
+  z: number;
+  x2?: number;
+  z2?: number;
+  labelX?: number;
+  labelZ?: number;
+  floor: string;
+  y?: number;
+  top?: number;
+  bottom?: number;
+};
 
 const groups = rawMaps as MapGroup[];
 const aliases: Record<string, string> = {
@@ -94,6 +112,13 @@ function rememberLayer(key: string, on: boolean) {
 let map: L.Map | null = null;
 let token = 0;
 let mapSlug = "";
+let placeRows: MapPlace[] = [];
+let placeEditing = false;
+let placeSelected = "";
+let placeDraft = false;
+let placeShape: "point" | "box" = "point";
+let placeNote = "";
+let placeSaving = false;
 let filterConfig: MapLayer | null = null;
 let filterDetail: Record<string, unknown> | null = null;
 let labelTimer = 0;
@@ -114,10 +139,34 @@ let questPersonSeeded = false;
 let questGuide: ((taskId: string) => void) | null = null;
 let questToggle: ((taskId: string, objectiveId: string, done: boolean) => void) | null = null;
 const layers = new Map<string, L.LayerGroup>();
-const placed: { marker: L.Marker; point: Point }[] = [];
+const placed: { marker: L.Layer; point: Point }[] = [];
 let tileLayer: L.TileLayer | null = null;
 let svgLayer: L.ImageOverlay | null = null;
 let activeConfig: MapLayer | null = null;
+
+export type PlayerMark = {
+  key: string;
+  userId: number;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number | null;
+  self: boolean;
+};
+
+export type PulseLine = { x1: number; z1: number; x2: number; z2: number; color: string; opacity: number };
+
+let playerGroup: L.LayerGroup | null = null;
+const playerLayers = new Map<string, L.Marker>();
+let playerMarks: PlayerMark[] = [];
+let shotNote = "战局里按游戏截图键，位置会同步到房间";
+let userDragging = false;
+let playerHooked = false;
+let mapReady: (() => void) | null = null;
+let pulseLayer: L.LayerGroup | null = null;
+let pulsePending: PulseLine[] = [];
 
 function findInteractive(slug: string): MapLayer | undefined {
   const key = aliases[slug] || slug;
@@ -160,18 +209,21 @@ function boundsFor(layer: MapLayer) {
 
 const ICON = "/tarkov/map-icons";
 
-function iconMarker(url: string, title: string, point: Point, anchor: [number, number] = [12, 12]) {
+function iconMarker(url: string, title: string, point: Point, anchor: [number, number] = [12, 12], html = "") {
   if (point.x == null || point.z == null) return null;
-  return L.marker([point.z, point.x], {
+  const marker = L.marker([point.z, point.x], {
     icon: L.icon({ iconUrl: url, iconSize: [24, 24], iconAnchor: anchor }),
     title,
-  }).bindTooltip(title, { direction: "top" });
+  });
+  if (html) marker.bindTooltip(html, { direction: "top", opacity: 1, className: "map-tip" });
+  else marker.bindTooltip(title, { direction: "top" });
+  return marker;
 }
 
-function extractMarker(kind: string, title: string, point: Point) {
+function extractMarker(kind: string, title: string, point: Point, popup = "") {
   if (point.x == null || point.z == null) return null;
   const color = extractColor(kind);
-  return L.marker([point.z, point.x], {
+  const marker = L.marker([point.z, point.x], {
     icon: L.divIcon({
       className: "map-extract",
       html: `<span class="map-extract-row"><img src="${ICON}/extract_${kind}.png" alt="" width="24" height="24"/><span style="color:${color}">${title}</span></span>`,
@@ -180,6 +232,8 @@ function extractMarker(kind: string, title: string, point: Point) {
     }),
     title,
   });
+  if (popup) marker.bindPopup(popup, { className: "map-popup", maxWidth: 320, autoPan: true });
+  return marker;
 }
 
 function finiteCoord(value: unknown): value is number {
@@ -195,40 +249,378 @@ function placeHtml(name: string) {
     .join("<br>");
 }
 
-function placePoint(row: Record<string, unknown>): Point | null {
-  const name = String(row.name || "");
-  const labelX = row.label_x ?? row.labelX;
-  const labelZ = row.label_z ?? row.labelZ;
-  const x = finiteCoord(labelX) && finiteCoord(labelZ) ? labelX : row.x;
-  const z = finiteCoord(labelX) && finiteCoord(labelZ) ? labelZ : row.z;
-  const x2 = row.x2;
-  const z2 = row.z2;
-  const pointX = row.kind === "box" && finiteCoord(x) && finiteCoord(z) && finiteCoord(x2) && finiteCoord(z2) && !finiteCoord(labelX)
-    ? (x + x2) / 2
-    : x;
-  const pointZ = row.kind === "box" && finiteCoord(x) && finiteCoord(z) && finiteCoord(x2) && finiteCoord(z2) && !finiteCoord(labelX)
-    ? (z + z2) / 2
-    : z;
-  if (!finiteCoord(pointX) || !finiteCoord(pointZ)) return null;
-  return {
-    name,
-    x: pointX,
-    z: pointZ,
-    y: finiteCoord(row.y) ? row.y : undefined,
-    top: finiteCoord(row.top) ? row.top : undefined,
-    bottom: finiteCoord(row.bottom) ? row.bottom : undefined,
-  };
-}
-
-function label(point: Point, title: string) {
+function label(point: Point, title: string, editing = false) {
   if (!finiteCoord(point.x) || !finiteCoord(point.z) || !title) return null;
   return L.marker([point.z, point.x], {
-    interactive: false,
-    icon: L.divIcon({ className: "map-place", html: title, iconSize: [80, 16], iconAnchor: [40, 8] }),
+    interactive: editing,
+    draggable: editing,
+    icon: L.divIcon({ className: `map-place${editing ? " editing" : ""}`, html: title, iconSize: [80, 16], iconAnchor: [40, 8] }),
   });
 }
 
-function add(key: string, marker: L.Marker | null, host: L.Map, point: Point) {
+function cleanPlaceName(value: string) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join("\n");
+}
+
+function readPlaces(value: unknown): MapPlace[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const row = item as Record<string, unknown>;
+    const id = String(row.id || "").trim();
+    const x = Number(row.x);
+    const z = Number(row.z);
+    if (!id || !Number.isFinite(x) || !Number.isFinite(z)) return [];
+    const x2 = Number(row.x2);
+    const z2 = Number(row.z2);
+    const labelX = Number(row.label_x ?? row.labelX);
+    const labelZ = Number(row.label_z ?? row.labelZ);
+    return [{
+      id,
+      name: String(row.name || ""),
+      kind: String(row.kind || "point"),
+      x,
+      z,
+      x2: Number.isFinite(x2) ? x2 : undefined,
+      z2: Number.isFinite(z2) ? z2 : undefined,
+      labelX: Number.isFinite(labelX) ? labelX : undefined,
+      labelZ: Number.isFinite(labelZ) ? labelZ : undefined,
+      floor: String(row.floor || ""),
+      y: finiteCoord(row.y) ? row.y : undefined,
+      top: finiteCoord(row.top) ? row.top : undefined,
+      bottom: finiteCoord(row.bottom) ? row.bottom : undefined,
+    }];
+  });
+}
+
+function placeAnchor(place: MapPlace): Point {
+  const height = { y: place.y, top: place.top, bottom: place.bottom };
+  if (place.labelX != null && place.labelZ != null) return { name: place.name, x: place.labelX, z: place.labelZ, ...height };
+  if (place.kind === "box" && place.x2 != null && place.z2 != null) return { name: place.name, x: (place.x + place.x2) / 2, z: (place.z + place.z2) / 2, ...height };
+  return { name: place.name, x: place.x, z: place.z, ...height };
+}
+
+function redrawPlaces() {
+  if (!map) return;
+  const previous = layers.get("places");
+  if (previous) {
+    for (let index = placed.length - 1; index >= 0; index -= 1) {
+      if (previous.hasLayer(placed[index].marker)) placed.splice(index, 1);
+    }
+    previous.clearLayers();
+  }
+  for (const place of placeRows) {
+    if (place.kind === "box" && place.x2 != null && place.z2 != null) {
+      const selected = place.id === placeSelected;
+      const rect = L.rectangle(L.latLngBounds([place.z, place.x], [place.z2, place.x2]), {
+        color: selected ? "#e8b84a" : "#c8932a",
+        weight: selected ? 2 : 1,
+        fillColor: "#c8932a",
+        fillOpacity: selected ? 0.18 : 0.08,
+        interactive: placeEditing,
+        className: "place-box",
+      });
+      if (placeEditing) {
+        rect.on("click", (event) => {
+          L.DomEvent.stopPropagation(event);
+          placeSelected = place.id;
+          placeDraft = false;
+          placeNote = "";
+          renderPlaceBar();
+          redrawPlaces();
+        });
+      }
+      add("places", rect, map, placeAnchor(place));
+    }
+    const point = placeAnchor(place);
+    const html = placeHtml(place.name);
+    if (!html) continue;
+    const marker = label(point, html, placeEditing);
+    if (!marker) continue;
+    if (placeEditing) {
+      marker.on("click", (event) => {
+        L.DomEvent.stopPropagation(event);
+        placeSelected = place.id;
+        placeDraft = false;
+        placeNote = "";
+        renderPlaceBar();
+        redrawPlaces();
+      });
+      marker.on("dragend", () => {
+        const at = marker.getLatLng();
+        void movePlace(place, at.lng, at.lat);
+      });
+    }
+    add("places", marker, map, point);
+    if (place.id === placeSelected) marker.getElement()?.classList.add("on");
+  }
+  applyFloorFade();
+}
+
+function selectedPlace() {
+  return placeRows.find((place) => place.id === placeSelected) || null;
+}
+
+function renderPlaceBar() {
+  const host = document.querySelector("#place-bar");
+  if (!host) return;
+  const place = selectedPlace();
+  const editing = placeEditing;
+  host.innerHTML = `
+    <div class="place-bar">
+      <button type="button" data-place-edit class="${editing ? "on" : ""}">${editing ? "完成地点" : "编辑地点"}</button>
+      <button type="button" data-place-new ${editing ? "" : "disabled"} class="${placeDraft && placeShape === "point" ? "on" : ""}">新地点</button>
+      <button type="button" data-place-box ${editing ? "" : "disabled"} class="${placeDraft && placeShape === "box" ? "on" : ""}">新区域</button>
+      ${placeNote ? `<p>${escPlayer(placeNote)}</p>` : ""}
+      ${editing && (place || (placeDraft && placeShape === "point") || draftBox) ? `<form id="place-form">
+        <textarea name="name" rows="4" placeholder="地点名称，回车换行">${escPlayer(place?.name || "")}</textarea>
+        <div>
+          <button type="submit" ${placeSaving ? "disabled" : ""}>保存</button>
+          ${place ? `<button type="button" data-place-delete ${placeSaving ? "disabled" : ""}>删除</button>` : ""}
+        </div>
+      </form>` : ""}
+    </div>`;
+  host.querySelector<HTMLButtonElement>("[data-place-edit]")?.addEventListener("click", () => {
+    placeEditing = !placeEditing;
+    stopPlaceDraft();
+    placeSelected = "";
+    placeNote = placeEditing ? "点地名可改字，拖动可挪位置。新区域请按住拖出矩形。" : "";
+    renderPlaceBar();
+    redrawPlaces();
+  });
+  host.querySelector<HTMLButtonElement>("[data-place-new]")?.addEventListener("click", () => {
+    if (!placeEditing) return;
+    if (placeDraft && placeShape === "point") stopPlaceDraft();
+    else {
+      stopPlaceDraft();
+      placeDraft = true;
+      placeShape = "point";
+      placeSelected = "";
+      placeNote = "在地图上点一下，放下新地点。";
+    }
+    renderPlaceBar();
+  });
+  host.querySelector<HTMLButtonElement>("[data-place-box]")?.addEventListener("click", () => {
+    if (!placeEditing) return;
+    if (placeDraft && placeShape === "box") stopPlaceDraft();
+    else {
+      stopPlaceDraft();
+      placeDraft = true;
+      placeShape = "box";
+      placeSelected = "";
+      placeNote = "按住地图拖出一块区域。";
+    }
+    renderPlaceBar();
+  });
+  host.querySelector("#place-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = host.querySelector<HTMLTextAreaElement>("[name=name]");
+    void savePlace(input?.value || "");
+  });
+  host.querySelector("[data-place-delete]")?.addEventListener("click", () => {
+    void deletePlace();
+  });
+}
+
+async function savePlace(rawName: string) {
+  const name = cleanPlaceName(rawName);
+  if (!name) {
+    placeNote = "请填写地点名称";
+    renderPlaceBar();
+    return;
+  }
+  if (!mapSlug) return;
+  placeSaving = true;
+  placeNote = "正在保存…";
+  renderPlaceBar();
+  try {
+    const current = selectedPlace();
+    if (current) {
+      const saved = await invoke<Record<string, unknown>>("site_patch", {
+        path: `/guides/tarkov/maps/${encodeURIComponent(mapSlug)}/places/${encodeURIComponent(current.id)}`,
+        body: { name, floor: current.floor || prefs.floor },
+      });
+      const next = adoptPlace(saved, { ...current, name });
+      placeRows = placeRows.map((place) => place.id === current.id ? next : place);
+      placeNote = "已保存";
+    } else if (placeDraft && placeShape === "box") {
+      if (!draftBox) {
+        placeNote = "先在地图上拖出区域";
+        return;
+      }
+      const box = draftBox;
+      const saved = await invoke<Record<string, unknown>>("site_post", {
+        path: `/guides/tarkov/maps/${encodeURIComponent(mapSlug)}/places`,
+        body: { kind: "box", name, x: box.x, z: box.z, x2: box.x2, z2: box.z2, floor: prefs.floor },
+      });
+      const next = adoptPlace(saved, { id: "", name, kind: "box", x: box.x, z: box.z, x2: box.x2, z2: box.z2, floor: prefs.floor });
+      if (next.id) placeRows = [...placeRows, next];
+      placeSelected = next.id;
+      stopPlaceDraft();
+      placeNote = next.id ? "已保存" : "已提交，但没有返回地点编号";
+    } else if (placeDraft && draftPoint) {
+      const saved = await invoke<Record<string, unknown>>("site_post", {
+        path: `/guides/tarkov/maps/${encodeURIComponent(mapSlug)}/places`,
+        body: { kind: "point", name, x: draftPoint.x, z: draftPoint.z, floor: prefs.floor },
+      });
+      const next = adoptPlace(saved, { id: "", name, kind: "point", x: draftPoint.x, z: draftPoint.z, floor: prefs.floor });
+      if (next.id) placeRows = [...placeRows, next];
+      placeSelected = next.id;
+      placeDraft = false;
+      draftPoint = null;
+      placeNote = next.id ? "已保存" : "已提交，但没有返回地点编号";
+    }
+  } catch (error) {
+    placeNote = error instanceof Error ? error.message : "保存地点失败";
+  } finally {
+    placeSaving = false;
+    renderPlaceBar();
+    redrawPlaces();
+  }
+}
+
+let draftPoint: { x: number; z: number } | null = null;
+let draftBox: { x: number; z: number; x2: number; z2: number } | null = null;
+let draftRect: L.Rectangle | null = null;
+let boxDrag: { x: number; z: number } | null = null;
+let boxListen = false;
+
+function clearDraftRect() {
+  draftRect?.remove();
+  draftRect = null;
+}
+
+function showDraftRect(box: { x: number; z: number; x2: number; z2: number }) {
+  if (!map) return;
+  const bounds = L.latLngBounds([box.z, box.x], [box.z2, box.x2]);
+  if (draftRect) draftRect.setBounds(bounds);
+  else draftRect = L.rectangle(bounds, { color: "#e8b84a", weight: 1, fillColor: "#c8932a", fillOpacity: 0.12, interactive: false }).addTo(map);
+}
+
+function stopPlaceDraft() {
+  placeDraft = false;
+  placeShape = "point";
+  draftPoint = null;
+  draftBox = null;
+  boxDrag = null;
+  clearDraftRect();
+  map?.dragging.enable();
+}
+
+function onBoxPointerDown(event: PointerEvent) {
+  if (!map || !placeEditing || !placeDraft || placeShape !== "box" || boxDrag) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest(".leaflet-marker-icon, .leaflet-popup, .leaflet-control, .place-box")) return;
+  const start = map.mouseEventToLatLng(event);
+  boxDrag = { x: start.lng, z: start.lat };
+  map.dragging.disable();
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onBoxPointerMove(event: PointerEvent) {
+  if (!map || !boxDrag) return;
+  const at = map.mouseEventToLatLng(event);
+  showDraftRect({ x: boxDrag.x, z: boxDrag.z, x2: at.lng, z2: at.lat });
+}
+
+function onBoxPointerUp(event: PointerEvent) {
+  if (!map || !boxDrag) return;
+  const start = boxDrag;
+  const at = map.mouseEventToLatLng(event);
+  boxDrag = null;
+  map.dragging.enable();
+  const box = { x: start.x, z: start.z, x2: at.lng, z2: at.lat };
+  if (Math.abs(box.x2 - box.x) < 0.5 || Math.abs(box.z2 - box.z) < 0.5) {
+    clearDraftRect();
+    draftBox = null;
+    placeNote = "区域太小，再拖一次。";
+    renderPlaceBar();
+    return;
+  }
+  draftBox = box;
+  draftPoint = null;
+  placeSelected = "";
+  showDraftRect(box);
+  placeNote = "填写名称后保存。回车会换行。";
+  renderPlaceBar();
+}
+
+function bindBoxDraw() {
+  if (!map || boxListen) return;
+  const container = map.getContainer();
+  container.addEventListener("pointerdown", onBoxPointerDown, true);
+  container.addEventListener("pointermove", onBoxPointerMove, true);
+  window.addEventListener("pointerup", onBoxPointerUp, true);
+  window.addEventListener("pointercancel", onBoxPointerUp, true);
+  boxListen = true;
+}
+
+function unbindBoxDraw() {
+  if (!boxListen) return;
+  const container = map?.getContainer();
+  container?.removeEventListener("pointerdown", onBoxPointerDown, true);
+  container?.removeEventListener("pointermove", onBoxPointerMove, true);
+  window.removeEventListener("pointerup", onBoxPointerUp, true);
+  window.removeEventListener("pointercancel", onBoxPointerUp, true);
+  boxListen = false;
+  boxDrag = null;
+}
+
+function adoptPlace(saved: Record<string, unknown>, fallback: MapPlace): MapPlace {
+  const row = (saved.place && typeof saved.place === "object" ? saved.place : saved) as Record<string, unknown>;
+  const parsed = readPlaces([row])[0];
+  return parsed ? { ...fallback, ...parsed, name: parsed.name || fallback.name } : { ...fallback, id: String(row.id || fallback.id) };
+}
+
+async function movePlace(place: MapPlace, x: number, z: number) {
+  const body = place.kind === "box" ? { label_x: x, label_z: z } : { x, z };
+  try {
+    const saved = await invoke<Record<string, unknown>>("site_patch", {
+      path: `/guides/tarkov/maps/${encodeURIComponent(mapSlug)}/places/${encodeURIComponent(place.id)}`,
+      body,
+    });
+    const next = adoptPlace(saved, place.kind === "box" ? { ...place, labelX: x, labelZ: z } : { ...place, x, z });
+    placeRows = placeRows.map((item) => item.id === place.id ? next : item);
+    placeNote = "位置已保存";
+  } catch (error) {
+    placeNote = error instanceof Error ? error.message : "更新地点失败";
+  }
+  renderPlaceBar();
+  redrawPlaces();
+}
+
+async function deletePlace() {
+  const place = selectedPlace();
+  if (!place || !mapSlug) return;
+  placeSaving = true;
+  placeNote = "正在删除…";
+  renderPlaceBar();
+  try {
+    await invoke("site_delete", { path: `/guides/tarkov/maps/${encodeURIComponent(mapSlug)}/places/${encodeURIComponent(place.id)}` });
+    placeRows = placeRows.filter((item) => item.id !== place.id);
+    placeSelected = "";
+    placeNote = "已删除";
+  } catch (error) {
+    placeNote = error instanceof Error ? error.message : "删除地点失败";
+  } finally {
+    placeSaving = false;
+    renderPlaceBar();
+    redrawPlaces();
+  }
+}
+
+function onPlaceMapClick(event: L.LeafletMouseEvent) {
+  if (!placeEditing || !placeDraft || placeShape !== "point") return;
+  const target = event.originalEvent.target;
+  if (target instanceof Element && target.closest(".leaflet-marker-icon, .leaflet-popup")) return;
+  draftPoint = { x: event.latlng.lng, z: event.latlng.lat };
+  placeSelected = "";
+  placeNote = "填写名称后保存。回车会换行。";
+  renderPlaceBar();
+}
+
+function add(key: string, marker: L.Layer | null, host: L.Map, point: Point) {
   if (!marker) return;
   let group = layers.get(key);
   if (!group) {
@@ -243,8 +635,12 @@ function applyFloorFade() {
   const bands = markerFloorBands(activeConfig);
   for (const item of placed) {
     const view = markerFloorDisplay(item.point, prefs.floor, bands);
-    item.marker.setOpacity(view.opacity);
-    item.marker.setZIndexOffset(view.zBoost);
+    if (item.marker instanceof L.Marker) {
+      item.marker.setOpacity(view.opacity);
+      item.marker.setZIndexOffset(view.zBoost);
+    } else if (item.marker instanceof L.Path) {
+      item.marker.setStyle({ opacity: view.opacity, fillOpacity: view.opacity * 0.16 });
+    }
   }
 }
 
@@ -307,6 +703,7 @@ export function setMapFloor(name: string) {
   applyRememberedBase();
   applyFloorFade();
   paintQuests();
+  drawPlayers(false);
 }
 
 export function toggleFold(id: string) {
@@ -371,6 +768,118 @@ export function watchLiveMapCamera(listener: () => void) {
   map?.on("moveend zoomend", listener);
 }
 
+export function onLiveMapReady(listener: () => void) {
+  mapReady = listener;
+}
+
+export function currentMapSlug() {
+  return mapSlug;
+}
+
+export function setShotNote(text: string) {
+  shotNote = text;
+  const node = document.querySelector("#shot-note");
+  if (node) node.textContent = text;
+}
+
+export function setPlayerMarks(marks: PlayerMark[], follow: false | "fly" | "pan" = false) {
+  playerMarks = marks;
+  drawPlayers(follow);
+}
+
+export function setPulseLines(lines: PulseLine[]) {
+  pulsePending = lines;
+  if (!map) return;
+  if (!pulseLayer) pulseLayer = L.layerGroup().addTo(map);
+  pulseLayer.clearLayers();
+  for (const line of lines) {
+    if (line.opacity <= 0) continue;
+    L.polyline([[line.z1, line.x1], [line.z2, line.x2]], {
+      color: line.color,
+      weight: 2,
+      opacity: line.opacity,
+      interactive: false,
+    }).addTo(pulseLayer);
+  }
+}
+
+function hookPlayers() {
+  if (!map || playerHooked) return;
+  playerHooked = true;
+  map.on("zoomend", () => drawPlayers(false));
+  map.on("dragstart", () => { userDragging = true; });
+  map.on("dragend", () => { userDragging = false; });
+}
+
+function headingDeg(x: number, z: number, yaw: number) {
+  if (!map) return null;
+  const rad = (yaw * Math.PI) / 180;
+  const from = map.latLngToLayerPoint(L.latLng(z, x));
+  const to = map.latLngToLayerPoint(L.latLng(z + Math.cos(rad), x + Math.sin(rad)));
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (!dx && !dy) return null;
+  return (Math.atan2(dx, -dy) * 180) / Math.PI;
+}
+
+function escPlayer(value: string) {
+  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+}
+
+function drawPlayers(follow: false | "fly" | "pan") {
+  if (!map) return;
+  hookPlayers();
+  if (!playerGroup) playerGroup = L.layerGroup().addTo(map);
+  const keep = new Set(playerMarks.map((mark) => mark.key));
+  for (const [key, marker] of [...playerLayers]) {
+    if (keep.has(key)) continue;
+    playerGroup.removeLayer(marker);
+    playerLayers.delete(key);
+  }
+  const bands = markerFloorBands(activeConfig);
+  for (const mark of playerMarks) {
+    const yaw = mark.yaw == null ? null : headingDeg(mark.x, mark.z, mark.yaw);
+    const view = markerFloorDisplay({ x: mark.x, z: mark.z, y: mark.y }, prefs.floor, bands);
+    const pip = yaw == null
+      ? `<span class="player-dot"></span>`
+      : `<span class="player-arrow" style="transform:rotate(${yaw}deg)"></span>`;
+    const name = escPlayer(mark.name.trim());
+    const label = name ? `<span class="player-name">${name}</span>` : "";
+    const icon = L.divIcon({
+      className: "player-icon",
+      html: `<span class="player-mark" style="color:${escPlayer(mark.color)};opacity:${view.opacity}"><span class="player-glow"></span>${pip}${label}</span>`,
+      iconSize: [32, name ? 44 : 32],
+      iconAnchor: [16, 16],
+    });
+    let marker = playerLayers.get(mark.key);
+    if (!marker) {
+      marker = L.marker([mark.z, mark.x], { icon, interactive: false, keyboard: false, zIndexOffset: mark.self ? 920 : 900 });
+      marker.addTo(playerGroup);
+      playerLayers.set(mark.key, marker);
+    } else {
+      marker.setLatLng([mark.z, mark.x]);
+      marker.setIcon(icon);
+      marker.setZIndexOffset(mark.self ? 920 : 900);
+    }
+  }
+  setPulseLines(pulsePending);
+  if (!follow || userDragging) return;
+  const self = playerMarks.find((mark) => mark.self);
+  if (!self || !map) return;
+  const floor = floorForSpan(
+    Number.isFinite(self.y) ? { min: self.y, max: self.y } : null,
+    bands,
+    { x: self.x, z: self.z },
+  );
+  if (floor !== prefs.floor) setMapFloor(floor);
+  if (follow === "fly") {
+    const zoom = Math.max(map.getZoom(), (map.getMinZoom() || 1) + 1);
+    map.flyTo([self.z, self.x], zoom, { animate: true, duration: 0.35 });
+    return;
+  }
+  map.panTo([self.z, self.x], { animate: true, duration: 0.2 });
+}
+
 export function invalidateLiveMap() {
   map?.invalidateSize();
 }
@@ -379,10 +888,25 @@ export function destroyLiveMap() {
   token += 1;
   questToken += 1;
   window.clearTimeout(labelTimer);
+  clearDraftRect();
+  unbindBoxDraw();
   map?.remove();
   map = null;
+  playerGroup = null;
+  pulseLayer = null;
+  playerLayers.clear();
+  playerHooked = false;
+  userDragging = false;
   layers.clear();
   placed.length = 0;
+  placeRows = [];
+  placeEditing = false;
+  placeSelected = "";
+  placeDraft = false;
+  placeShape = "point";
+  placeNote = "";
+  draftPoint = null;
+  draftBox = null;
   tileLayer = null;
   svgLayer = null;
   activeConfig = null;
@@ -414,11 +938,31 @@ export async function mountLiveMap(slug: string, fit = true) {
     minZoom: config.minZoom ?? 1,
     maxZoom: Math.max(7, config.maxZoom ?? 5),
   });
+  L.control.zoom({ position: "bottomright" }).addTo(map);
+  map.on("click", onPlaceMapClick);
+  bindBoxDraw();
+  map.on("popupopen", (event) => {
+    const root = event.popup.getElement();
+    if (!root) return;
+    const onClick = (click: Event) => {
+      const node = (click.target as Element | null)?.closest?.("[data-wiki]");
+      if (!(node instanceof HTMLElement) || !node.dataset.wiki || !node.dataset.wikiId) return;
+      L.DomEvent.stop(click);
+      window.dispatchEvent(new CustomEvent("zhange-wiki", { detail: { kind: node.dataset.wiki, id: node.dataset.wikiId } }));
+      map?.closePopup();
+    };
+    root.addEventListener("click", onClick);
+    event.popup.once("remove", () => root.removeEventListener("click", onClick));
+  });
   if (fit) map.fitBounds(bounds);
   applyRememberedBase();
+  hookPlayers();
+  drawPlayers(false);
   if (myToken !== token) return;
   try {
     const detail = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/maps/${slug}?loot_loose=true&loot_containers=true` });
+    const owned = await loadOwnedKeyIds();
+    setOwnedQuestKeys(owned);
     if (myToken !== token || !map) return;
     mapSlug = slug;
     filterConfig = config;
@@ -427,6 +971,8 @@ export async function mountLiveMap(slug: string, fit = true) {
     paintMarkers(detail);
     for (const key of layers.keys()) applyLayer(key);
     paintFilters(config, detail);
+    drawPlayers(false);
+    mapReady?.();
     map.on("zoomend", () => {
       window.clearTimeout(labelTimer);
       labelTimer = window.setTimeout(paintQuestLabels, 80);
@@ -437,12 +983,82 @@ export async function mountLiveMap(slug: string, fit = true) {
   }
 }
 
+type ExtractRow = Point & {
+  switches?: { name?: string; id?: string }[];
+  transfer_item?: { id?: string; name?: string; short_name?: string; count?: number; icon_link?: string };
+  outline?: { x?: number; z?: number }[];
+};
+
+type LootItem = {
+  id?: string;
+  name?: string;
+  short_name?: string;
+  shortName?: string;
+  icon_link?: string;
+  iconLink?: string;
+  count?: number;
+  types?: string[];
+  handbook_ids?: string[];
+};
+
+function lootIcon(item: LootItem) {
+  const id = String(item.id || "");
+  return String(item.icon_link || item.iconLink || "") || (/^[a-f0-9]{24}$/i.test(id) ? `https://assets.tarkov.dev/${id}-icon.webp` : "");
+}
+
+function lootJump(item: LootItem) {
+  const id = String(item.id || "").trim();
+  const name = String(item.name || item.short_name || item.shortName || "物品").trim();
+  const count = Number(item.count || 1);
+  const qty = count > 1 ? ` ×${count}` : "";
+  const icon = lootIcon(item);
+  const image = icon ? `<img src="${escPlayer(icon)}" alt="" width="28" height="28" />` : "";
+  const label = `${escPlayer(name)}${escPlayer(qty)}`;
+  if (!id) return `<span class="map-loot">${image}<strong>${label}</strong></span>`;
+  return `<button type="button" class="map-loot" data-wiki="item" data-wiki-id="${escPlayer(id)}">${image}<strong>${label}</strong></button>`;
+}
+
+function extractPopup(row: ExtractRow, kind: string) {
+  const color = extractColor(kind);
+  const name = escPlayer(String(row.name || "撤离点"));
+  const switches = (row.switches || []).map((item) => String(item.name || item.id || "").trim()).filter(Boolean);
+  const item = row.transfer_item;
+  const carryId = String(item?.id || "").trim();
+  const carryName = String(item?.name || item?.short_name || "").trim();
+  const carryCount = Number(item?.count || 1);
+  const owned = carryId ? ownedKeyState(carryId) : null;
+  const own = owned == null ? "" : owned ? " · 已有" : "";
+  const carry = carryId && carryName
+    ? `<button type="button" class="map-jump" data-wiki="item" data-wiki-id="${escPlayer(carryId)}">需携带 ${carryCount > 1 ? `${carryCount} × ` : ""}${escPlayer(carryName)}${own}</button>`
+    : "";
+  const activated = switches.length ? `<p>由 ${escPlayer(switches.join("、"))} 激活</p>` : "";
+  if (!carry && !activated) return "";
+  return `<div class="map-extract-pop"><strong style="color:${color}">${name}</strong>${activated}${carry}</div>`;
+}
+
+function loosePopup(items: LootItem[]) {
+  const cards = items.map(lootJump).join("");
+  return cards ? `<div class="map-loot-list">${cards}</div>` : "";
+}
+
 function paintMarkers(detail: Record<string, unknown>) {
   if (!map) return;
   const host = map;
-  for (const row of (detail.extracts as Point[]) || []) {
+  for (const row of (detail.extracts as ExtractRow[]) || []) {
     const kind = extractKind(String(row.faction || ""));
-    add(`extracts:${kind}`, extractMarker(kind, String(row.name || "撤离点"), row), host, row);
+    const popup = extractPopup(row, kind);
+    add(`extracts:${kind}`, extractMarker(kind, String(row.name || "撤离点"), row, popup), host, row);
+    const outline = (row.outline || []).filter((point) => point.x != null && point.z != null);
+    if (outline.length >= 3) {
+      const color = extractColor(kind);
+      add(`extracts:${kind}`, L.polygon(outline.map((point) => [point.z, point.x] as L.LatLngExpression), {
+        color,
+        weight: 2,
+        fillColor: color,
+        fillOpacity: 0.14,
+        interactive: false,
+      }), host, row);
+    }
   }
   for (const row of (detail.spawns as Point[]) || []) {
     const kind = String(row.kind || "pmc").toLowerCase();
@@ -450,23 +1066,31 @@ function paintMarkers(detail: Record<string, unknown>) {
     const file = kind === "sniper" ? "spawn_sniper_scav" : `spawn_${key.split(":")[1]}`;
     add(key, iconMarker(`${ICON}/${file}.png`, kind.toUpperCase(), row, kind === "pmc" ? [12, 24] : [12, 12]), host, row);
   }
-  for (const boss of (detail.bosses as { name?: string; locations?: { positions?: Point[] }[] }[]) || []) {
+  for (const boss of (detail.bosses as { id?: string; slug?: string; name?: string; spawn_chance?: number; spawnChance?: number; locations?: { name?: string; positions?: Point[] }[] }[]) || []) {
+    const chance = Number(boss.spawn_chance ?? boss.spawnChance);
+    const rate = Number.isFinite(chance) && chance > 0 ? `${chance}%` : "";
+    const bossId = String(boss.slug || boss.id || "").trim();
     for (const location of boss.locations || []) {
-      for (const point of location.positions || []) add("spawns:boss", iconMarker(`${ICON}/spawn_boss.png`, boss.name || "Boss", point), host, point);
+      const place = String(location.name || "").trim();
+      const title = boss.name || "Boss";
+      const tip = `<div class="map-boss-tip"><strong>${escPlayer(title)}</strong>${rate ? `<div>出生率 ${escPlayer(rate)}</div>` : ""}${place && place !== title ? `<div>${escPlayer(place)}</div>` : ""}</div>`;
+      const open = bossId ? `<button type="button" class="map-jump" data-wiki="boss" data-wiki-id="${escPlayer(bossId)}">查看档案</button>` : "";
+      for (const point of location.positions || []) {
+        const marker = iconMarker(`${ICON}/spawn_boss.png`, title, point, [12, 12], tip);
+        if (marker && open) marker.bindPopup(`${tip}${open}`, { className: "map-popup", maxWidth: 260, autoPan: true });
+        add("spawns:boss", marker, host, point);
+      }
     }
   }
-  for (const row of Array.isArray(detail.places) ? detail.places : []) {
-    if (!row || typeof row !== "object") continue;
-    try {
-      const point = placePoint(row as Record<string, unknown>);
-      const html = placeHtml(String((row as { name?: unknown }).name || ""));
-      if (!point || !html) continue;
-      add("places", label(point, html), host, point);
-    } catch {
-      /* 单条标注数据不完整时跳过，避免整张图停掉 */
-    }
+  placeRows = readPlaces(detail.places);
+  redrawPlaces();
+  renderPlaceBar();
+  for (const row of (detail.locks as (Point & { key_id?: string })[]) || []) {
+    const keyId = String(row.key_id || "").trim();
+    const owned = keyId ? ownedKeyState(keyId) : null;
+    const title = `${String(row.name || "锁")}${owned == null ? "" : owned ? " · 已有" : " · 未有"}`;
+    add("locks", iconMarker(`${ICON}/lock.png`, title, row), host, row);
   }
-  for (const row of (detail.locks as Point[]) || []) add("locks", iconMarker(`${ICON}/lock.png`, String(row.name || "锁"), row), host, row);
   for (const row of (detail.stationary_weapons as Point[]) || []) add("stationary", iconMarker(`${ICON}/stationarygun.png`, String(row.name || "固定机枪"), row), host, row);
   for (const row of (detail.switches as Point[]) || []) add("switches", iconMarker(`${ICON}/switch.png`, String(row.name || "开关"), row), host, row);
   for (const row of (detail.btr_stops as Point[]) || []) add("btr", iconMarker(`${ICON}/btr_stop.png`, String(row.name || "BTR 停车点"), row), host, row);
@@ -481,7 +1105,10 @@ function paintMarkers(detail: Record<string, unknown>) {
   }
   for (const row of (detail.loot_loose as LoosePile[]) || []) {
     const kind = looseKind(row);
-    add(`loose:${kind}`, iconMarker(looseIcon(kind, row), "散落物", row), host, row);
+    const popup = loosePopup(row.items || []);
+    const marker = iconMarker(looseIcon(kind, row), "散落物", row);
+    if (marker && popup) marker.bindPopup(popup, { className: "map-popup", maxWidth: 280, autoPan: true });
+    add(`loose:${kind}`, marker, host, row);
   }
   applyFloorFade();
   paintQuests();
@@ -576,7 +1203,7 @@ const LOOSE_LABELS: Record<string, string> = {
   "5b47574386f77428ca22b2f3": "医疗用品",
 };
 
-type LoosePile = Point & { items?: { handbook_ids?: string[] }[] };
+type LoosePile = Point & { items?: LootItem[] };
 
 function containerKind(name: string) {
   return name.trim() || "other";
@@ -665,6 +1292,7 @@ function paintFilters(config: MapLayer, detail: Record<string, unknown>) {
     group("loot", "可搜刮物品", `${ICON}/container_crate.png`, containerKinds.map((kind) => `loot:${kind}`), containerKinds.map((kind) => row(`loot:${kind}`, containerLabel(kind), containerIcon(kind), true)).join("")),
     group("loose", "散落物", `${ICON}/loose_loot.png`, looseKinds.map((kind) => `loose:${kind}`), looseKinds.map((kind) => row(`loose:${kind}`, LOOSE_LABELS[kind] || "其他", `https://assets.tarkov.dev/handbook-category-${kind}-icon.webp`, true)).join("")),
     questFilterHtml(),
+    `<div class="filter-block"><p class="filter-title">位置同步</p><p class="filter-note" id="shot-note">${escPlayer(shotNote)}</p></div>`,
   ];
   panel.innerHTML = html.filter(Boolean).join("");
   const parent = panel.querySelector<HTMLInputElement>("[data-quest-parent]");

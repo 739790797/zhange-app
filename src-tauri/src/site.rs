@@ -349,6 +349,10 @@ pub async fn put(path: String, body: Value) -> Result<Value, String> {
     send(reqwest::Method::PUT, &with_game_mode(&path), Some(body)).await
 }
 
+pub async fn patch(path: String, body: Value) -> Result<Value, String> {
+    send(reqwest::Method::PATCH, &with_game_mode(&path), Some(body)).await
+}
+
 pub async fn delete(path: String) -> Result<Value, String> {
     send(reqwest::Method::DELETE, &with_game_mode(&path), None).await
 }

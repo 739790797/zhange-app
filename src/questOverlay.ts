@@ -4,6 +4,21 @@ export const QUEST_COLORS = ["#e8c36a", "#6cb6ff", "#6fbf4a", "#e08a2c", "#d44a4
 export const QUEST_HELP_COLOR = "#8a8878";
 export const QUEST_OTHER_FLOOR = 0.28;
 const LABEL_PX = 48;
+let ownedKeys: Set<string> | null = null;
+
+export function setOwnedQuestKeys(ids: Set<string> | null) {
+  ownedKeys = ids;
+}
+
+export function ownedKeyState(id: string): boolean | null {
+  if (!ownedKeys || !id) return null;
+  return ownedKeys.has(id);
+}
+
+function keyMark(name: string, id: string) {
+  if (!ownedKeys || !id) return name;
+  return ownedKeys.has(id) ? `${name}·已有` : `${name}·未有`;
+}
 
 const MAP_EQUIV = [
   ["streets", "streets-of-tarkov"],
@@ -50,6 +65,7 @@ export type QuestOverlay = {
   steps: QuestStep[];
   traderSlug: string;
   keyNames: string[];
+  keyIds: string[];
   showNoKey: boolean;
   optional: boolean;
   objectiveId: string;
@@ -67,6 +83,7 @@ export type QuestLabelItem = {
   traderSlug: string;
   subtitle: string;
   keyNames: string[];
+  keyIds: string[];
   showNoKey: boolean;
   optional: boolean;
   done?: boolean;
@@ -222,15 +239,17 @@ function applies(obj: Objective, keys: Set<string>) {
   return false;
 }
 
-function keyNames(obj: Objective) {
+function keyRefs(obj: Objective) {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: { id: string; name: string }[] = [];
   for (const group of obj.required_keys || []) {
     for (const key of group || []) {
       const name = readable(key.name, key.id);
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      out.push(name);
+      const id = (key.id || "").trim();
+      const mark = id || name;
+      if (!name || seen.has(mark)) continue;
+      seen.add(mark);
+      out.push({ id, name });
     }
   }
   return out;
@@ -310,7 +329,9 @@ export function buildQuestOverlays(tasks: readonly QuestTask[], mapSlug: string)
       const marked = steps.map((step) => ({ ...step, active: step.id === objId }));
       const subtitle = marked.find((step) => step.active)?.text || stepText(obj);
       const optional = Boolean(obj.optional);
-      const names = keyNames(obj);
+      const refs = keyRefs(obj);
+      const names = refs.map((key) => key.name);
+      const ids = refs.map((key) => key.id);
       const seenZones = new Set<string>();
       let zoneIdx = 0;
       for (const zone of obj.zones || []) {
@@ -335,6 +356,7 @@ export function buildQuestOverlays(tasks: readonly QuestTask[], mapSlug: string)
           steps: marked,
           traderSlug,
           keyNames: names,
+          keyIds: ids,
           showNoKey: false,
           optional,
           objectiveId: objId,
@@ -359,6 +381,7 @@ export function buildQuestOverlays(tasks: readonly QuestTask[], mapSlug: string)
           steps: marked,
           traderSlug,
           keyNames: names,
+          keyIds: ids,
           showNoKey: false,
           optional,
           objectiveId: objId,
@@ -485,6 +508,7 @@ export function clusterQuestLabels(overlays: readonly QuestOverlay[], project: (
         traderSlug: row.traderSlug,
         subtitle: row.subtitle,
         keyNames: row.keyNames,
+        keyIds: row.keyIds,
         showNoKey: row.showNoKey,
         optional: row.optional,
         ...(row.done ? { done: true } : {}),
@@ -591,9 +615,9 @@ function traderImg(slug: string) {
   return `<img class="quest-trader" src="${icon}" alt="" width="20" height="20" onerror="this.onerror=function(){this.remove()};this.src='${portrait}'">`;
 }
 
-function keyLabel(names: readonly string[], showNoKey: boolean) {
+function keyLabel(names: readonly string[], ids: readonly string[], showNoKey: boolean) {
   if (showNoKey) return "不需要钥匙";
-  const list = names.map((name) => name.trim()).filter(Boolean);
+  const list = names.map((name, index) => keyMark(name.trim(), ids[index] || "")).filter(Boolean);
   if (!list.length) return "";
   if (list.length <= 2) return list.join("、");
   return `${list.slice(0, 2).join("、")}…`;
@@ -601,7 +625,7 @@ function keyLabel(names: readonly string[], showNoKey: boolean) {
 
 export function questLabelHtml(item: QuestLabelItem, offFloor: boolean, done: boolean) {
   const title = item.optional ? `${item.title}（可选）` : item.title;
-  const keys = keyLabel(item.keyNames, item.showNoKey);
+  const keys = keyLabel(item.keyNames, item.keyIds, item.showNoKey);
   const keyMark = keys ? `<span class="${item.showNoKey ? "quest-label-nokey" : "quest-label-key"}">${esc(keys)}</span>` : "";
   const help = done ? `<span class="quest-label-help">帮</span>` : "";
   const paint = paintColor(item.color, done);
@@ -609,7 +633,7 @@ export function questLabelHtml(item: QuestLabelItem, offFloor: boolean, done: bo
 }
 
 export function questBubbleHtml(
-  row: Pick<QuestOverlay, "title" | "subtitle" | "steps" | "color" | "traderSlug" | "keyNames" | "showNoKey" | "kind" | "done" | "neededBy">,
+  row: Pick<QuestOverlay, "title" | "subtitle" | "steps" | "color" | "traderSlug" | "keyNames" | "keyIds" | "showNoKey" | "kind" | "done" | "neededBy">,
   actions: readonly { id: string; label: string }[] = [],
   hint = "",
 ) {
@@ -617,7 +641,12 @@ export function questBubbleHtml(
   const stepHtml = steps.length
     ? `<span class="quest-tip-steps">${steps.map((step) => `<span class="quest-tip-step${step.active ? " on" : ""}"${step.active ? ` style="color:${esc(paintColor(row.color, row.done))}"` : ""}>${esc(step.text)}</span>`).join("")}</span>`
     : "";
-  const keys = row.keyNames.filter(Boolean).map((name) => `<span class="quest-tip-key">${esc(name)}</span>`).join("");
+  const keys = row.keyNames.filter(Boolean).map((name, index) => {
+    const id = row.keyIds[index] || "";
+    const mine = ownedKeys && id ? ownedKeys.has(id) : null;
+    const klass = mine == null ? "" : mine ? " owned" : " missing";
+    return `<span class="quest-tip-key${klass}">${esc(keyMark(name, id))}</span>`;
+  }).join("");
   const keyRow = keys ? `<span class="quest-tip-keys"><span class="quest-tip-key-label">所需钥匙</span>${keys}</span>` : row.showNoKey ? `<span class="quest-tip-nokey">不需要钥匙</span>` : "";
   const help = row.done ? `<span class="quest-tip-help">你已完成，地图上留给还没勾的队友</span>` : "";
   const people = questPeople(row.neededBy || []);

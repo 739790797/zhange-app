@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::site;
@@ -12,6 +12,7 @@ use crate::site;
 struct Slot {
     id: String,
     stop: watch::Sender<bool>,
+    out: mpsc::UnboundedSender<String>,
 }
 
 static SLOT: Mutex<Option<Slot>> = Mutex::new(None);
@@ -30,14 +31,24 @@ pub fn watch(app: AppHandle, public_id: String) {
         let _ = slot.stop.send(true);
     }
     let (stop, rx) = watch::channel(false);
+    let (out, out_rx) = mpsc::unbounded_channel();
     *guard = Some(Slot {
         id: public_id.clone(),
         stop,
+        out,
     });
     drop(guard);
     tauri::async_runtime::spawn(async move {
-        run(app, public_id, rx).await;
+        run(app, public_id, rx, out_rx).await;
     });
+}
+
+pub fn send(text: String) -> Result<(), String> {
+    let guard = SLOT.lock().expect("room ws");
+    let Some(slot) = guard.as_ref() else {
+        return Err("房间未连接".into());
+    };
+    slot.out.send(text).map_err(|_| "房间未连接".to_string())
 }
 
 pub fn unwatch() {
@@ -46,13 +57,13 @@ pub fn unwatch() {
     }
 }
 
-async fn run(app: AppHandle, public_id: String, mut stop: watch::Receiver<bool>) {
+async fn run(app: AppHandle, public_id: String, mut stop: watch::Receiver<bool>, mut out: mpsc::UnboundedReceiver<String>) {
     let mut attempt = 0u32;
     loop {
         if *stop.borrow() {
             break;
         }
-        let ended = connect(&app, &public_id, &mut stop).await;
+        let ended = connect(&app, &public_id, &mut stop, &mut out).await;
         if *stop.borrow() {
             break;
         }
@@ -66,7 +77,12 @@ async fn run(app: AppHandle, public_id: String, mut stop: watch::Receiver<bool>)
     }
 }
 
-async fn connect(app: &AppHandle, public_id: &str, stop: &mut watch::Receiver<bool>) -> Result<(), String> {
+async fn connect(
+    app: &AppHandle,
+    public_id: &str,
+    stop: &mut watch::Receiver<bool>,
+    out: &mut mpsc::UnboundedReceiver<String>,
+) -> Result<(), String> {
     let token = site::access_token();
     if token.is_empty() {
         return Err("未登录".into());
@@ -89,6 +105,10 @@ async fn connect(app: &AppHandle, public_id: &str, stop: &mut watch::Receiver<bo
             }
             _ = ping.tick() => {
                 let _ = write.send(Message::Text(r#"{"event":"ping"}"#.into())).await;
+            }
+            outgoing = out.recv() => {
+                let Some(text) = outgoing else { return Ok(()) };
+                let _ = write.send(Message::Text(text.into())).await;
             }
             incoming = read.next() => {
                 match incoming {

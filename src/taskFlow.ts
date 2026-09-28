@@ -228,7 +228,7 @@ function card(task: Quest) {
   const locked = status === "todo" && !available(task);
   const roman = ["", "I", "II", "III", "IV"][Math.min(4, Math.max(1, task.loyalty))] || "I";
   return `<article class="flow-card status-${status}${locked ? " locked" : ""}">
-    <strong title="${esc(task.name)}">${esc(task.name)}</strong>
+    <strong><button type="button" class="flow-name" data-wiki="task" data-wiki-id="${esc(task.id)}" title="${esc(task.name)}">${esc(task.name)}</button></strong>
     <div class="flow-meta">
       <div class="flow-req">
         <span>等级要求：</span><b>${task.level || "—"}</b>

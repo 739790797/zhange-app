@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-patch"
+description = "Enables the site_patch command without any pre-configured scope."
+commands.allow = ["site_patch"]
+
+[[permission]]
+identifier = "deny-site-patch"
+description = "Denies the site_patch command without any pre-configured scope."
+commands.deny = ["site_patch"]

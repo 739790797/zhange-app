@@ -25,6 +25,8 @@ struct LogEvent {
     mode: String,
     quest_kind: String,
     task_id: String,
+    phase: String,
+    raid_id: String,
 }
 
 struct Snap {
@@ -34,6 +36,8 @@ struct Snap {
     location: String,
     slug: String,
     mode: String,
+    phase: String,
+    raid_id: String,
 }
 
 struct Tail {
@@ -49,6 +53,8 @@ static SNAP: Mutex<Snap> = Mutex::new(Snap {
     location: String::new(),
     slug: String::new(),
     mode: String::new(),
+    phase: String::new(),
+    raid_id: String::new(),
 });
 
 pub fn spawn(app: AppHandle) {
@@ -68,6 +74,8 @@ pub struct WatchState {
     pub in_raid: bool,
     pub server: String,
     pub location: String,
+    pub phase: String,
+    pub raid_id: String,
 }
 
 struct Live {
@@ -100,6 +108,8 @@ pub fn state() -> WatchState {
         in_raid: snap.in_raid,
         server: snap.server.clone(),
         location: snap.location.clone(),
+        phase: snap.phase.clone(),
+        raid_id: snap.raid_id.clone(),
     }
 }
 
@@ -246,21 +256,48 @@ fn apply_lines(app: &AppHandle, text: &str, live: bool) {
                     snap.started = None;
                 }
                 snap.slug = slug.clone();
+                snap.phase = "map_loading".into();
                 if live {
                     drop(snap);
                     if was {
                         emit(app, "raid-end", &slug, "", "", "");
                     }
                     emit(app, "map", &slug, "", "", "");
+                    emit_phase(app, "map_loading", &slug, "");
                     snap = SNAP.lock().expect("log-watch");
                 }
             }
-        } else if is_hideout(line) && snap.in_raid {
-            snap.in_raid = false;
-            snap.started = None;
+        } else if line.contains("LocationLoaded") && !line.contains("LocationLoadedTime") {
+            snap.phase = "matching".into();
             if live {
                 drop(snap);
-                emit(app, "raid-end", "", "", "", "");
+                emit_phase(app, "matching", "", "");
+                snap = SNAP.lock().expect("log-watch");
+            }
+        } else if is_hideout(line) {
+            let ended = snap.in_raid;
+            let changed = ended || !snap.slug.is_empty() || snap.phase != "raid_exited";
+            if changed {
+                snap.in_raid = false;
+                snap.started = None;
+                snap.slug.clear();
+                snap.phase = "raid_exited".into();
+                if live {
+                    drop(snap);
+                    if ended {
+                        emit(app, "raid-end", "", "", "", "");
+                    }
+                    emit_phase(app, "raid_exited", "", "");
+                    snap = SNAP.lock().expect("log-watch");
+                }
+            }
+        }
+        if line.contains("GameStarting") && !line.contains("GameStarted") {
+            snap.phase = "raid_starting".into();
+            if live {
+                let slug = snap.slug.clone();
+                drop(snap);
+                emit_phase(app, "raid_starting", &slug, "");
                 snap = SNAP.lock().expect("log-watch");
             }
         }
@@ -269,9 +306,37 @@ fn apply_lines(app: &AppHandle, text: &str, live: bool) {
                 let fresh = !snap.in_raid || snap.started != Some(stamp);
                 snap.in_raid = true;
                 snap.started = Some(stamp);
+                snap.phase = "raid_started".into();
                 if live && fresh {
                     drop(snap);
                     emit(app, "raid-start", "", "", "", "");
+                    emit_phase(app, "raid_started", "", "");
+                    snap = SNAP.lock().expect("log-watch");
+                }
+            }
+        }
+        if line.contains("Network game matching aborted") || line.contains("Network game matching cancelled") {
+            snap.phase = "matching_aborted".into();
+            if live {
+                drop(snap);
+                emit_phase(app, "matching_aborted", "", "");
+                snap = SNAP.lock().expect("log-watch");
+            }
+        }
+        if line.contains("Got notification | UserMatchOver") {
+            let ended = snap.in_raid;
+            let changed = ended || !snap.slug.is_empty() || snap.phase != "raid_exited";
+            if changed {
+                snap.in_raid = false;
+                snap.started = None;
+                snap.slug.clear();
+                snap.phase = "raid_exited".into();
+                if live {
+                    drop(snap);
+                    if ended {
+                        emit(app, "raid-end", "", "", "", "");
+                    }
+                    emit_phase(app, "raid_exited", "", "");
                     snap = SNAP.lock().expect("log-watch");
                 }
             }
@@ -284,15 +349,30 @@ fn apply_lines(app: &AppHandle, text: &str, live: bool) {
             if !location.is_empty() {
                 snap.location = location.clone();
             }
+            let raid_id = short_id(line);
+            if !raid_id.is_empty() {
+                snap.raid_id = raid_id.clone();
+            }
+            snap.phase = "match_found".into();
+            let slug_now = if snap.slug.is_empty() {
+                location_slug(&location).unwrap_or_default()
+            } else {
+                snap.slug.clone()
+            };
             if snap.slug.is_empty() {
                 if let Some(slug) = location_slug(&location) {
-                    snap.slug = slug.clone();
-                    if live {
-                        drop(snap);
-                        emit(app, "map", &slug, "", "", "");
-                        snap = SNAP.lock().expect("log-watch");
-                    }
+                    snap.slug = slug;
                 }
+            }
+            if live {
+                let slug = slug_now;
+                let raid = snap.raid_id.clone();
+                drop(snap);
+                if !slug.is_empty() {
+                    emit(app, "map", &slug, "", "", "");
+                }
+                emit_phase(app, "match_found", &slug, &raid);
+                snap = SNAP.lock().expect("log-watch");
             }
         }
     }
@@ -317,7 +397,26 @@ fn end_raid(app: &AppHandle) {
     emit(app, "raid-end", "", "", "", "");
 }
 
+fn short_id(line: &str) -> String {
+    let marker = "shortId:";
+    let Some(index) = line.find(marker) else { return String::new() };
+    line[index + marker.len()..]
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric())
+        .take(6)
+        .collect()
+}
+
 fn emit(app: &AppHandle, kind: &str, slug: &str, mode: &str, quest_kind: &str, task_id: &str) {
+    emit_full(app, kind, slug, mode, quest_kind, task_id, "", "");
+}
+
+fn emit_phase(app: &AppHandle, phase: &str, slug: &str, raid_id: &str) {
+    emit_full(app, "phase", slug, "", "", "", phase, raid_id);
+}
+
+fn emit_full(app: &AppHandle, kind: &str, slug: &str, mode: &str, quest_kind: &str, task_id: &str, phase: &str, raid_id: &str) {
     let _ = app.emit(
         "log-watch",
         LogEvent {
@@ -326,6 +425,8 @@ fn emit(app: &AppHandle, kind: &str, slug: &str, mode: &str, quest_kind: &str, t
             mode: mode.into(),
             quest_kind: quest_kind.into(),
             task_id: task_id.into(),
+            phase: phase.into(),
+            raid_id: raid_id.into(),
         },
     );
 }
