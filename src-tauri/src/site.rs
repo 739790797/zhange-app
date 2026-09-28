@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,8 @@ fn cookie_header(cookies: &HashMap<String, String>) -> String {
 
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(25))
         .build()
         .map_err(|err| err.to_string())
 }

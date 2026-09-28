@@ -46,11 +46,14 @@ export function overlayView(): "overlay" | "" {
 
 export function overlayCardHtml() {
   return `
-    <section class="overlay-card" id="overlay-card">
-      <button type="button" id="map-summary">准备内容总结</button>
+    <div class="dock-lead" id="overlay-card">
+      <button type="button" id="map-summary" class="map-summary-launch">
+        <span>准备内容总结</span>
+        <small>勾选任务后查看所需物品</small>
+      </button>
       <button type="button" id="overlay-settings">地图覆盖层设置</button>
       <button type="button" id="shot-settings">截图设置</button>
-    </section>`;
+    </div>`;
 }
 
 export function overlayDialogHtml(pop = false) {

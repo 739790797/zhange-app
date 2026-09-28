@@ -3,7 +3,7 @@ function esc(value: string) {
 }
 
 export function isPending(text: string) {
-  return text.startsWith("正在读取") || text.startsWith("正在加载");
+  return text.startsWith("正在");
 }
 
 export function spin(label = "正在读取", compact = false) {

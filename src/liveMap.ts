@@ -1103,13 +1103,21 @@ export function setMapStyle(style: "tile" | "svg") {
   applyRememberedBase();
 }
 
+let floorApply = false;
+
 export function setMapFloor(name: string) {
-  setAccountFloor(mapFilterKey(), name);
-  savePrefs();
-  applyRememberedBase();
-  applyFloorFade();
-  paintQuests();
-  drawPlayers(false);
+  if (floorApply) return;
+  floorApply = true;
+  try {
+    setAccountFloor(mapFilterKey(), name);
+    savePrefs();
+    applyRememberedBase();
+    applyFloorFade();
+    paintQuests();
+    drawPlayers(false);
+  } finally {
+    floorApply = false;
+  }
 }
 
 export function toggleFold(id: string) {
@@ -1396,7 +1404,7 @@ export async function mountLiveMap(slug: string, fit = true) {
     maxZoom: Math.max(7, config.maxZoom ?? 5),
   });
   hookMapMotion();
-  L.control.zoom({ position: "bottomright" }).addTo(map);
+  L.control.zoom({ position: "bottomleft" }).addTo(map);
   map.on("click", onPlaceMapClick);
   bindBoxDraw();
   map.on("popupopen", (event) => {

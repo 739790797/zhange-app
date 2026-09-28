@@ -11,7 +11,7 @@ import { keyShell, mountKeys, openKeyList } from "./keys";
 import { paintGoonBars, startGoonWatch } from "./goon";
 import { findMap, mapTitle, sameMap } from "./mapNames";
 import { applyRoomSync, clearMapPresence, loadMapBoard, mapBoardHtml, mapBoardReady, noteLocalPhase, paintMapPickGoon, refreshMapBoard, resetMapBoard, setLocalWatch } from "./mapPicker";
-import { closeLobbyDialog, lobbyShell, mountLobby, setLobbyNote, setLobbyRoomKeep } from "./lobby";
+import { closeLobbyDialog, lobbyShell, mountLobby, setLobbyNote, setLobbyRoomKeep, settleLobbyJoin } from "./lobby";
 import { mountWorkbench, workbenchShell } from "./workbench";
 import { catalogShell, matchCatalog, mountCatalog, pinCatalogList } from "./itemCatalog";
 import { fadeIn, fadeOut } from "./motion";
@@ -48,6 +48,8 @@ type RoomMember = {
   clients: RoomClient[];
   inRoom: boolean;
 };
+type RoomViewMap = { userId: number; mapSlug: string };
+type RoomPhase = { userId: number; kind: string };
 type RoomClaim = { taskId: string; userId: number; name: string };
 type RoomObjective = { taskId: string; objectiveId: string; userId: number };
 type RoomDetail = {
@@ -62,6 +64,8 @@ type RoomDetail = {
   maxMembers: number;
   isHost: boolean;
   members: RoomMember[];
+  viewMaps: RoomViewMap[];
+  phases: RoomPhase[];
   claims: RoomClaim[];
   objectives: RoomObjective[];
 };
@@ -87,6 +91,7 @@ let claimSeedKey = "";
 let lastMapSlug = "";
 let gameInRaid = false;
 let gameMapSlug = "";
+let localPhaseKind = "";
 let spectating = false;
 let ignoredRoomId = "";
 let mapPage: HTMLElement | null = null;
@@ -297,9 +302,17 @@ function shownMap(slug: string) {
   return mapTitle(slug, map?.name || "");
 }
 
+function mapToolIcon(kind: "sidebars" | "full" | "exit") {
+  if (kind === "sidebars") return `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M2.6 3h2.6v10H2.6zM10.8 3H13.4v10h-2.6z"/></svg>`;
+  const stroke = `fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`;
+  if (kind === "exit") return `<svg viewBox="0 0 16 16" aria-hidden="true"><path ${stroke} d="M6.2 3v3.2H3M9.8 3v3.2H13M6.2 13v-3.2H3M9.8 13v-3.2H13"/></svg>`;
+  return `<svg viewBox="0 0 16 16" aria-hidden="true"><path ${stroke} d="M3 6.2V3h3.2M13 6.2V3h-3.2M3 9.8V13h3.2M13 9.8V13h-3.2"/></svg>`;
+}
+
 function mapView(slug: string) {
   const name = shownMap(slug);
   const image = `<div class="map-viewport" id="map-viewport"><div id="map-root" data-slug="${slug}"></div></div>`;
+  const fullscreen = Boolean(document.fullscreenElement);
   return `
     <section class="map-app tarkov-page">
       ${image}
@@ -313,37 +326,43 @@ function mapView(slug: string) {
         ${topNav("实时地图")}
       </div>
       <button type="button" class="goon-bar map-goon" hidden></button>
-      <button type="button" id="map-fullscreen" class="map-full">${document.fullscreenElement ? "退出全屏" : "全屏"}</button>
       <div class="left-stack">
         <button class="room-expand" type="button" data-expand="room" hidden>房间</button>
-        <section class="room-card" id="room-panel">
+        <section class="room-card" id="room-panel" aria-label="房间信息">
           <header class="room-head">
-            <span class="room-home" aria-hidden="true"></span>
-            <strong>房间</strong>
-            <span class="room-code" id="room-code">……</span>
-            <button type="button" data-room="copy">复制</button>
-            <button type="button" data-collapse="room">收起</button>
+            <div class="room-head-text">
+              <h2 class="room-title" id="room-title">房间</h2>
+              <p class="room-meta" id="room-meta"></p>
+            </div>
+            <button type="button" class="room-collapse" data-collapse="room">收起</button>
           </header>
           <div class="room-actions">
+            <button type="button" data-room="maps">更换地图</button>
+            <button type="button" data-room="copy">复制编号</button>
             <button type="button" class="room-leave" data-room="leave">离开房间</button>
           </div>
           <div id="room-live"></div>
         </section>
-        <aside class="overlay left" id="filter-panel">
-          <header><strong>筛选</strong><button type="button" data-collapse="filter">收起</button></header>
+        <aside class="overlay left" id="filter-panel" aria-label="地图筛选">
+          <header><strong>图层</strong><button type="button" data-collapse="filter">收起</button></header>
           <div id="place-bar"></div>
           <div class="panel-body" id="filter-body">${spin("正在读取图层")}</div>
         </aside>
       </div>
-      <button class="overlay-tab left" type="button" data-expand="filter" hidden>筛选</button>
+      <button class="overlay-tab left" type="button" data-expand="filter" hidden>图层</button>
       <div class="right-stack">
-        ${overlayCardHtml()}
         <aside class="overlay right" id="task-panel">
           <header><strong>任务</strong><button type="button" data-collapse="task">收起</button></header>
+          ${overlayCardHtml()}
           <div class="panel-body tasks" id="task-body">${spin("正在读取任务")}</div>
         </aside>
       </div>
       <button class="overlay-tab right" type="button" data-expand="task" hidden>任务</button>
+      <div class="map-dock" role="toolbar" aria-label="地图工具">
+        <button type="button" class="map-dock-icon" id="map-sidebars" aria-pressed="true" title="收起侧边栏" aria-label="收起侧边栏">${mapToolIcon("sidebars")}</button>
+        <span class="map-dock-divider" aria-hidden="true"></span>
+        <button type="button" class="map-dock-icon" id="map-fullscreen" aria-pressed="${fullscreen ? "true" : "false"}" title="${fullscreen ? "退出全屏" : "全屏"}" aria-label="${fullscreen ? "退出全屏" : "全屏"}">${mapToolIcon(fullscreen ? "exit" : "full")}</button>
+      </div>
       ${overlayDialogHtml()}
       ${shotSettingsDialogHtml()}
       <div id="map-summary-modal" class="map-summary" hidden>
@@ -813,7 +832,10 @@ function rememberBoardRoom(raw: Record<string, unknown> | null) {
 }
 
 function renderMapPicker() {
-  const body = maps.length
+  const pending = roomPending ? room.status || "正在加入房间…" : "";
+  const body = pending
+    ? `<section class="map-loading">${spin(pending)}<p>${esc(pending)}</p></section>`
+    : maps.length
     ? mapBoardHtml(maps)
     : isPending(mapsNote || "正在读取地图") ? spin("正在读取地图") : plainView("实时地图", esc(mapsNote));
   return tarkovFrame("实时地图", [
@@ -902,6 +924,8 @@ function readDetail(value: Record<string, unknown>): RoomDetail | null {
         inRoom: item.in_room !== false && item.inRoom !== false,
       };
     }),
+    viewMaps: readViewMaps(value.view_maps ?? value.viewMaps),
+    phases: readPhases(value.log_phases ?? value.logPhases),
     claims: (Array.isArray(value.claims) ? value.claims : []).flatMap((row) => {
       const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
       const taskId = String(item.task_id || item.taskId || "").trim();
@@ -918,6 +942,49 @@ function readDetail(value: Record<string, unknown>): RoomDetail | null {
       return [{ taskId, objectiveId, userId }];
     }),
   };
+}
+
+function readViewMaps(raw: unknown): RoomViewMap[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RoomViewMap[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const userId = Number(row.user_id || row.userId || 0);
+    if (!userId) continue;
+    out.push({ userId, mapSlug: String(row.map_slug || row.mapSlug || "").trim() });
+  }
+  return out;
+}
+
+function readPhases(raw: unknown): RoomPhase[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RoomPhase[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const userId = Number(row.user_id || row.userId || 0);
+    const kind = String(row.kind || "").trim();
+    if (!userId || !kind) continue;
+    out.push({ userId, kind });
+  }
+  return out;
+}
+
+function absorbRoomLists(payload: Record<string, unknown>, snap: Record<string, unknown> | null) {
+  if (!room.detail) return;
+  const phases = payload.log_phases ?? snap?.log_phases;
+  const views = payload.view_maps ?? snap?.view_maps;
+  let changed = false;
+  if (phases !== undefined) {
+    room.detail.phases = readPhases(phases);
+    changed = true;
+  }
+  if (views !== undefined) {
+    room.detail.viewMaps = readViewMaps(views);
+    changed = true;
+  }
+  if (changed) paintRoomCard();
 }
 
 function roomClients(raw: unknown): RoomClient[] {
@@ -962,13 +1029,18 @@ function roomCode(id: string) {
 }
 
 function failText(reason: unknown, fallback: string) {
-  if (typeof reason === "string" && reason.trim()) return reason;
-  if (reason instanceof Error && reason.message) return reason.message;
-  if (reason && typeof reason === "object" && "message" in reason) {
-    const message = String((reason as { message: unknown }).message || "");
-    if (message) return message;
+  let message = "";
+  if (typeof reason === "string" && reason.trim()) message = reason.trim();
+  else if (reason instanceof Error && reason.message) message = reason.message;
+  else if (reason && typeof reason === "object" && "message" in reason) {
+    message = String((reason as { message: unknown }).message || "");
   }
-  return fallback;
+  if (/timed out|timeout|超时/i.test(message)) {
+    if (fallback.includes("加入房间")) return "加入房间超时，请再试一次";
+    if (fallback.includes("更换地图")) return "更换地图超时，请再试一次";
+    return "请求超时，请再试一次";
+  }
+  return message || fallback;
 }
 
 function applyDetail(detail: RoomDetail, slug: string, password = room.password) {
@@ -983,36 +1055,88 @@ function applyDetail(detail: RoomDetail, slug: string, password = room.password)
   };
 }
 
+const MEMBER_COLORS = ["#e8c36a", "#6cb6ff", "#6fbf4a", "#e08a2c", "#d44a4a", "#c77dff", "#4ab8b8", "#f0a3c2"];
+
+function memberColor(userId: number) {
+  const id = `user:${userId}`;
+  let hash = 2166136261;
+  for (let index = 0; index < id.length; index += 1) {
+    hash ^= id.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return MEMBER_COLORS[Math.abs(hash) % MEMBER_COLORS.length] || MEMBER_COLORS[0];
+}
+
+function memberViewSlug(userId: number) {
+  const listed = room.detail?.viewMaps.find((item) => item.userId === userId)?.mapSlug || "";
+  if (listed) return listed;
+  if (userId === viewerId) return liveMapSlug();
+  return "";
+}
+
+function memberTone(online: boolean, kind: string, mapSlug: string) {
+  if (!online) return "offline";
+  if (kind === "match_found" || kind === "raid_starting" || kind === "raid_started") return "in_raid";
+  if (kind === "map_loading" || kind === "matching") return "matching";
+  if (mapSlug) return "watching";
+  return "lobby";
+}
+
+function toneLabel(tone: string) {
+  if (tone === "offline") return "离线";
+  if (tone === "in_raid") return "战局中";
+  if (tone === "matching") return "匹配中";
+  if (tone === "watching") return "观战中";
+  return "大厅中";
+}
+
+function phaseKindFor(userId: number) {
+  if (userId === viewerId && localPhaseKind) return localPhaseKind;
+  return room.detail?.phases.find((item) => item.userId === userId)?.kind || "";
+}
+
+function memberMapText(userId: number) {
+  const listed = room.detail?.viewMaps.find((item) => item.userId === userId)?.mapSlug || "";
+  const slug = listed || (userId === viewerId ? liveMapSlug() || room.slug : "");
+  if (!slug) return "—";
+  return shownMap(slug) || "—";
+}
+
 function paintRoomCard() {
   const live = document.querySelector("#room-live");
-  const code = document.querySelector("#room-code");
-  if (!live || !code) return;
+  const title = document.querySelector("#room-title");
+  const meta = document.querySelector("#room-meta");
+  if (!live || !title || !meta) return;
   if (room.error) {
-    code.textContent = "未建立";
+    title.textContent = "房间";
+    meta.textContent = "";
     live.innerHTML = `<p class="room-error">${esc(room.error)}</p>`;
     return;
   }
   if (!room.id || !room.detail) {
-    code.textContent = "创建中";
-    live.innerHTML = `<p class="room-wait">${esc(room.status || "正在创建私人房间…")}</p>`;
+    title.textContent = "房间";
+    meta.textContent = room.status || "正在创建私人房间…";
+    live.innerHTML = "";
     return;
   }
   const detail = room.detail;
   const seated = detail.members.filter((item) => item.inRoom);
   const people = seated.length ? seated : detail.members;
-  code.textContent = roomCode(detail.id);
-  const memberHtml = people.map((item) => {
-    const mine = item.name === viewerName || (detail.isHost && item.host);
+  const mapName = shownMap(detail.mapSlug || room.slug) || "未选地图";
+  const count = seated.length || people.length;
+  const max = detail.maxMembers;
+  title.textContent = detail.title.trim() || "房间";
+  meta.textContent = `${mapName} · ${count}${max ? `/${max}` : ""} · ${roomCode(detail.id)}`;
+  const rows = people.map((item) => {
     const on = item.online || shownClients(item).length > 0;
-    return `<li>
-      <span class="room-dot" data-on="${on ? "1" : "0"}"></span>
-      <span class="room-name">${esc(item.name)}</span>
-      ${mine ? `<span class="room-tag you">你</span>` : ""}
-      ${item.host ? `<span class="room-tag host">队长</span>` : ""}
-      <span class="room-state">${esc(onlineLabel(item))}</span>
-    </li>`;
+    const tone = memberTone(on, phaseKindFor(item.userId), memberViewSlug(item.userId));
+    return `<tr data-status="${tone}">
+      <td><span class="room-person"><i class="room-dot" style="background:${memberColor(item.userId)}"></i>${item.host ? `<span class="room-star">⭐</span>` : ""}<span class="room-person-name">${esc(item.name)}</span><span class="room-presence">${esc(onlineLabel(item))}</span></span></td>
+      <td>${esc(memberMapText(item.userId))}</td>
+      <td>${toneLabel(tone)}</td>
+    </tr>`;
   }).join("");
-  live.innerHTML = `<ul class="room-members">${memberHtml || `<li><span class="room-name">${esc(viewerName || "你")}</span></li>`}</ul>`;
+  live.innerHTML = `<table class="room-table"><thead><tr><th scope="col">成员</th><th scope="col">地图</th><th scope="col">状态</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function pushQuestRoom() {
@@ -1202,6 +1326,7 @@ function openSyncedPicker() {
 
 function followAccount(payload: Record<string, unknown>, snap: Record<string, unknown> | null) {
   if (!room.id || roomPending) return;
+  absorbRoomLists(payload, snap);
   const phase = rowListPhase(payload.log_phases) || rowListPhase(snap?.log_phases);
   const leaving = phase?.kind === "raid_exited" || phase?.kind === "matching_aborted";
   if (phase) {
@@ -1222,7 +1347,7 @@ function followAccount(payload: Record<string, unknown>, snap: Record<string, un
   const next = accountSlug(view);
   if (accountViewSlug && sameMap(accountViewSlug, next)) return;
   accountViewSlug = next;
-  if (!path().startsWith("/主菜单/逃离塔科夫/实时地图")) return;
+  if (!liveMapSlug()) return;
   openSyncedMap(next);
 }
 
@@ -1298,10 +1423,10 @@ async function refreshRoom() {
   }
 }
 
-function waitForRoomLive(id: string) {
+function waitForRoomLive(id: string, ms = 8000) {
   if (roomLive && socketRoomId === id) return Promise.resolve(true);
   return new Promise<boolean>((resolve) => {
-    const timer = window.setTimeout(() => finish(false), 8000);
+    const timer = window.setTimeout(() => finish(false), ms);
     const poll = window.setInterval(() => {
       if (roomLive && room.id === id) finish(true);
     }, 100);
@@ -1441,6 +1566,22 @@ async function createPublicRoom(title: string, listed: boolean, password: string
   }
 }
 
+function withTimeout<T>(work: Promise<T>, ms: number, message: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), ms);
+    work.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(message));
+      },
+    );
+  });
+}
+
 async function switchRoomMap(slug: string) {
   if (!room.id || roomPending || slug === (room.detail?.mapSlug || "")) return;
   const id = room.id;
@@ -1449,27 +1590,29 @@ async function switchRoomMap(slug: string) {
   room = { slug, id, status: "正在连接房间…", error: "", password, detail: null };
   lastMapSlug = slug;
   go(`/主菜单/逃离塔科夫/实时地图/${slug}`);
-  await waitForRoomLive(id);
-  if (room.id !== id) {
-    roomPending = false;
-    return;
-  }
+  await waitForRoomLive(id, 1500);
+  if (room.id !== id) return;
   room.status = "正在更换地图…";
   render();
   try {
-    const mapped = await invoke<Record<string, unknown>>("site_post", {
+    const mapped = await withTimeout(invoke<Record<string, unknown>>("site_post", {
       path: `/guides/tarkov/raid-rooms/${id}/map`,
       body: { map: slug },
-    });
+    }), 30000, "更换地图超时，请再试一次");
     if (room.id !== id) return;
-    const seeded = await invoke<Record<string, unknown>>("site_post", {
-      path: `/guides/tarkov/raid-rooms/${id}/claims/from-progress`,
-      body: {},
-    }).catch(() => mapped);
-    if (room.id !== id) return;
-    const detail = readDetail(seeded) || readDetail(mapped);
+    const detail = readDetail(mapped);
     if (detail) applyDetail(detail, slug, password);
     else roomPending = false;
+    render();
+    void invoke<Record<string, unknown>>("site_post", {
+      path: `/guides/tarkov/raid-rooms/${id}/claims/from-progress`,
+      body: {},
+    }).then((seeded) => {
+      if (room.id !== id || roomPending) return;
+      const next = readDetail(seeded);
+      if (next) adoptRoom(next);
+    }).catch(() => undefined);
+    return;
   } catch (error) {
     if (room.id !== id) return;
     roomPending = false;
@@ -1607,7 +1750,7 @@ function paint() {
   if (known === "实时地图") {
     window.clearInterval(usageTimer);
     root.innerHTML = renderMapPicker();
-    if (maps.length && !mapBoardReady()) {
+    if (!roomPending && maps.length && !mapBoardReady()) {
       void loadMapBoard({ roomId: room.id, viewerId, viewerName }, maps).then((found) => {
         rememberBoardRoom(found);
         if (gameInRaid && gameMapSlug && room.id) {
@@ -2014,16 +2157,16 @@ function raidPhase(kind: string) {
 function noteGame(input: { inRaid?: boolean; slug?: string; phase?: string }) {
   if (input.slug) gameMapSlug = input.slug;
   const phase = input.phase || "";
+  if (phase) localPhaseKind = phase;
   if (phase === "raid_exited" || phase === "matching_aborted") {
     gameInRaid = false;
     gameMapSlug = "";
-    return;
-  }
-  if (input.inRaid === true || raidPhase(phase)) {
+  } else if (input.inRaid === true || raidPhase(phase)) {
     gameInRaid = true;
-    return;
+  } else if (input.inRaid === false) {
+    gameInRaid = false;
   }
-  if (input.inRaid === false) gameInRaid = false;
+  paintRoomCard();
 }
 
 function returnToMapPicker() {
@@ -2035,6 +2178,22 @@ function returnToMapPicker() {
   go("/主菜单/逃离塔科夫/实时地图");
 }
 
+let raidNav: "" | "picker" | "raid" = "";
+let raidNavQueued = false;
+
+function queueRaidNav(next: "picker" | "raid") {
+  raidNav = next;
+  if (raidNavQueued) return;
+  raidNavQueued = true;
+  queueMicrotask(() => {
+    raidNavQueued = false;
+    const intent = raidNav;
+    raidNav = "";
+    if (intent === "picker") returnToMapPicker();
+    else if (intent === "raid") openLiveRaidMap();
+  });
+}
+
 async function onLogWatch(event: LogWatch) {
   if (event.kind === "phase" || event.kind === "map" || event.kind === "raid-end") {
     noteLocalPhase(event.kind === "raid-end" ? { kind: "raid_exited" } : { kind: event.phase, mapId: event.slug });
@@ -2044,9 +2203,9 @@ async function onLogWatch(event: LogWatch) {
     if (onMapPicker()) refreshMapBoard();
   }
   if (event.kind === "raid-end" || event.phase === "raid_exited" || event.phase === "matching_aborted") {
-    returnToMapPicker();
+    queueRaidNav("picker");
   } else if (gameInRaid) {
-    openLiveRaidMap();
+    queueRaidNav("raid");
   }
   const state = await ensureOverlayState();
   if (event.kind === "map" && event.slug && state?.autoFollow !== false && room.id && path() !== "/登录" && !sameMap(liveMapSlug(), event.slug)) {
@@ -2100,7 +2259,12 @@ async function boot() {
   if (bootOverlayShell()) return;
   document.addEventListener("fullscreenchange", () => {
     const button = document.querySelector("#map-fullscreen");
-    if (button) button.textContent = document.fullscreenElement ? "退出全屏" : "全屏";
+    if (!button) return;
+    const on = Boolean(document.fullscreenElement);
+    button.innerHTML = mapToolIcon(on ? "exit" : "full");
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.setAttribute("aria-label", on ? "退出全屏" : "全屏");
+    button.setAttribute("title", on ? "退出全屏" : "全屏");
   });
   startGoonWatch(() => {
     paintGoonBars((slug) => shownMap(slug));
@@ -2190,6 +2354,10 @@ document.addEventListener("click", (event) => {
       return;
     }
     go(next);
+    return;
+  }
+  if (target.closest("#map-sidebars")) {
+    setMapSidebars(!mapSidebarsOpen());
     return;
   }
   if (target.closest("#map-fullscreen")) {
@@ -2297,17 +2465,53 @@ document.addEventListener("click", (event) => {
   if (collapse?.dataset.collapse) {
     document.querySelector(`#${collapse.dataset.collapse}-panel`)?.classList.add("collapsed");
     document.querySelector<HTMLElement>(`[data-expand="${collapse.dataset.collapse}"]`)?.removeAttribute("hidden");
+    syncMapDock();
     return;
   }
   const expand = target.closest<HTMLButtonElement>("[data-expand]");
   if (expand?.dataset.expand) {
     document.querySelector(`#${expand.dataset.expand}-panel`)?.classList.remove("collapsed");
     expand.setAttribute("hidden", "");
+    syncMapDock();
     return;
   }
   const roomAction = target.closest<HTMLButtonElement>("[data-room]");
   if (roomAction?.dataset.room) void onRoomAction(roomAction.dataset.room, roomAction);
 });
+
+function mapPanel(id: string) {
+  return document.querySelector(`#${id}-panel`);
+}
+
+function mapSidebarsOpen() {
+  return ["room", "filter", "task"].some((id) => {
+    const node = mapPanel(id);
+    return node && !node.classList.contains("collapsed");
+  });
+}
+
+function syncMapDock() {
+  const leftOpen = ["room", "filter"].some((id) => {
+    const node = mapPanel(id);
+    return node && !node.classList.contains("collapsed");
+  });
+  document.querySelector(".map-app")?.classList.toggle("rails-closed", !leftOpen);
+  const button = document.querySelector("#map-sidebars");
+  if (!button) return;
+  const open = mapSidebarsOpen();
+  const label = open ? "收起侧边栏" : "展开侧边栏";
+  button.setAttribute("aria-pressed", open ? "true" : "false");
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+}
+
+function setMapSidebars(open: boolean) {
+  for (const id of ["room", "filter", "task"]) {
+    mapPanel(id)?.classList.toggle("collapsed", !open);
+    document.querySelector<HTMLElement>(`[data-expand="${id}"]`)?.setAttribute("hidden", "");
+  }
+  syncMapDock();
+}
 
 async function onRoomAction(action: string, button: HTMLButtonElement) {
   if (action === "copy") {
@@ -2315,7 +2519,11 @@ async function onRoomAction(action: string, button: HTMLButtonElement) {
     const text = room.password ? `房间 ${roomCode(room.id)} 密码 ${room.password}` : roomCode(room.id);
     await navigator.clipboard.writeText(text).catch(() => undefined);
     button.textContent = "已复制";
-    window.setTimeout(() => { button.textContent = "复制"; }, 1200);
+    window.setTimeout(() => { button.textContent = "复制编号"; }, 1200);
+    return;
+  }
+  if (action === "maps") {
+    go("/主菜单/逃离塔科夫/实时地图");
     return;
   }
   if (action === "leave") {
@@ -2326,26 +2534,43 @@ async function onRoomAction(action: string, button: HTMLButtonElement) {
 }
 
 async function joinRoom(code: string, password: string) {
+  const seq = ++roomSeq;
+  ignoredRoomId = "";
+  roomPending = true;
+  room = { slug: "", id: code, status: "正在加入房间…", error: "", password, detail: null };
+  lastMapSlug = "";
+  resetMapBoard();
+  go("/主菜单/逃离塔科夫/实时地图");
   try {
-    const data = await invoke<Record<string, unknown>>("site_post", {
+    const data = await withTimeout(invoke<Record<string, unknown>>("site_post", {
       path: `/guides/tarkov/raid-rooms/${encodeURIComponent(code)}/join`,
       body: password ? { game_mode: gameMode, password } : { game_mode: gameMode },
-    });
+    }), 30000, "加入房间超时，请再试一次");
+    if (seq !== roomSeq) return;
     const detail = readDetail(data);
     if (!detail) throw new Error("没有返回房间信息");
-    roomSeq += 1;
-    applyDetail(detail, detail.mapSlug || lastMapSlug, password);
-    if (gameInRaid && gameMapSlug) {
+    applyDetail(detail, "", password);
+    const mine = detail.viewMaps.find((item) => item.userId === viewerId)?.mapSlug || "";
+    const slug = detail.mapSlug || mine;
+    if (gameInRaid && gameMapSlug && !sameMap(slug, gameMapSlug)) {
       void switchRoomMap(gameMapSlug);
       return;
     }
-    const slug = detail.mapSlug || lastMapSlug;
-    if (slug) lastMapSlug = slug;
-    go(slug ? `/主菜单/逃离塔科夫/实时地图/${slug}` : "/主菜单/逃离塔科夫/实时地图");
-    return;
+    if (slug) {
+      lastMapSlug = slug;
+      go(`/主菜单/逃离塔科夫/实时地图/${slug}`);
+      return;
+    }
+    resetMapBoard();
+    render();
   } catch (error) {
-    const message = error instanceof Error ? error.message : "加入房间失败";
-    setLobbyNote(message);
+    if (seq !== roomSeq) return;
+    roomPending = false;
+    room = { slug: "", id: "", status: "", error: "", password: "", detail: null };
+    go("/主菜单/逃离塔科夫/联机大厅");
+    setLobbyNote(failText(error, "加入房间失败"));
+  } finally {
+    settleLobbyJoin();
   }
 }
 

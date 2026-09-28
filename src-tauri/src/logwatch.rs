@@ -532,7 +532,7 @@ fn follow_file(tail: &mut Tail, path: &Path, app: &AppHandle, live: bool) {
                 apply_lines(app, &text, true);
             }
         }
-        let offset = if live { 0 } else { replay_file(app, path) };
+        let offset = replay_file(app, path);
         *tail = Tail { path: path.to_path_buf(), offset, pending: String::new() };
         if live {
             if let Some(text) = tail.read_new() {
@@ -541,10 +541,17 @@ fn follow_file(tail: &mut Tail, path: &Path, app: &AppHandle, live: bool) {
         }
         return;
     }
-    if live {
-        if let Some(text) = tail.read_new() {
-            apply_lines(app, &text, true);
-        }
+    if !live {
+        return;
+    }
+    let shrunk = fs::metadata(path).map(|meta| meta.len() < tail.offset).unwrap_or(false);
+    if shrunk {
+        let offset = replay_file(app, path);
+        *tail = Tail { path: path.to_path_buf(), offset, pending: String::new() };
+        return;
+    }
+    if let Some(text) = tail.read_new() {
+        apply_lines(app, &text, true);
     }
 }
 

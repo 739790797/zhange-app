@@ -187,13 +187,13 @@ fn overlay_return_focus() {
 }
 
 #[tauri::command]
-fn log_state() -> logwatch::WatchState {
-    logwatch::state()
+async fn log_state() -> logwatch::WatchState {
+    tokio::task::spawn_blocking(logwatch::state).await.expect("log-state")
 }
 
 #[tauri::command]
-fn log_tails() -> logwatch::LogTails {
-    logwatch::tails()
+async fn log_tails() -> logwatch::LogTails {
+    tokio::task::spawn_blocking(logwatch::tails).await.expect("log-tails")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

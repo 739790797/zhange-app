@@ -258,13 +258,14 @@ fn apply(app: &AppHandle, state: &OverlayState) {
 fn apply_map(app: &AppHandle, state: &OverlayState) {
     let Some(window) = app.get_webview_window(MAP_LABEL) else { return };
     let _ = window.set_always_on_top(state.always_on_top);
-    let _ = window.set_ignore_cursor_events(false);
     if !state.visible {
-        // 直接藏起当前画面。退出系统全屏会先把窗口缩回小尺寸，关掉时就会闪一下。
+        // 先让点击穿过，再藏起窗口。收起若慢一拍，也不能把主窗口的点击吃掉。
+        let _ = window.set_ignore_cursor_events(true);
         conceal_window(&window);
         let _ = window.hide();
         return;
     }
+    let _ = window.set_ignore_cursor_events(false);
     let shaped = if state.fullscreen {
         // 系统全屏会先露出原先的小窗，再异步铺满。显示前直接摆到屏幕尺寸。
         if let Some((x, y, width, height)) = monitor_bounds(&window) {
@@ -400,7 +401,8 @@ fn on_map_event(window: &tauri::WebviewWindow, event: &WindowEvent) {
             }
         }
         WindowEvent::Moved(position) => {
-            if get().fullscreen || *ADJUSTING.lock().expect("overlay-adjust") {
+            let current = get();
+            if !current.visible || current.fullscreen || *ADJUSTING.lock().expect("overlay-adjust") {
                 return;
             }
             let mut state = get();
@@ -419,6 +421,9 @@ fn on_map_event(window: &tauri::WebviewWindow, event: &WindowEvent) {
                 return;
             }
             let mut state = get();
+            if !state.visible {
+                return;
+            }
             if state.fullscreen {
                 drop(adjusting);
                 apply_shape(window, &state, Some((size.width, size.height)));
@@ -441,6 +446,10 @@ fn on_map_event(window: &tauri::WebviewWindow, event: &WindowEvent) {
             }
             state.width = width;
             state.height = height;
+            state.visible = get().visible;
+            if !state.visible {
+                return;
+            }
             store(&state);
             *STATE.lock().expect("overlay") = Some(state.clone());
             drop(adjusting);

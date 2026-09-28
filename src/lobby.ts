@@ -42,6 +42,7 @@ let draftPrivate = false;
 let draftPassword = "";
 let draftCode = "";
 let creating = false;
+let joining = false;
 let refreshing = false;
 let shownDialog = "";
 let releasing = "";
@@ -157,7 +158,7 @@ function render() {
         ? `<td class="lobby-merge" rowspan="${span}">${esc(room.title)}</td>`
         : "";
       const tail = index === 0
-        ? `<td class="num lobby-merge" rowspan="${span}">${room.members}${room.max ? ` / ${room.max}` : ""}</td><td class="lobby-act lobby-merge" rowspan="${span}"><button type="button" class="lobby-join" data-lobby-join-btn ${full ? "disabled" : ""}>加入</button></td>`
+        ? `<td class="num lobby-merge" rowspan="${span}">${room.members}${room.max ? ` / ${room.max}` : ""}</td><td class="lobby-act lobby-merge" rowspan="${span}"><button type="button" class="lobby-join" data-lobby-join-btn ${full || joining ? "disabled" : ""}>${joining && !full ? "加入中…" : "加入"}</button></td>`
         : "";
       const statusClass = seat.status === "战局中" ? "is-raid" : seat.status === "观战中" ? "is-watch" : seat.status === "匹配中" ? "is-match" : "is-lobby";
       return `<tr>
@@ -191,12 +192,14 @@ function render() {
 }
 
 function join(id: string, password = "") {
+  if (joining) return;
   const room = rooms.find((item) => item.id.toLowerCase() === id.trim().toLowerCase());
   if (room && room.max > 0 && room.members >= room.max) {
     note = "房间已满";
     paint();
     return;
   }
+  joining = true;
   note = "";
   dialog = "";
   window.dispatchEvent(new CustomEvent("zhange-join-room", { detail: { code: id.trim(), password } }));
@@ -453,8 +456,14 @@ export function closeLobbyDialog() {
   draftCode = "";
 }
 
+export function settleLobbyJoin() {
+  joining = false;
+  if (document.querySelector("#lobby")) paint();
+}
+
 export function setLobbyNote(message: string) {
   note = message;
   creating = false;
+  joining = false;
   if (document.querySelector("#lobby")) paint();
 }

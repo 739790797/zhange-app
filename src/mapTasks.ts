@@ -251,11 +251,11 @@ function paint() {
     const group = pin(visible.filter((task) => statusOf(task) === status));
     if (!group.length) return "";
     if (status !== "active") {
-      return `<p class="map-task-label">${STATUS_LABEL[status]} ${group.length}</p>${group.map(row).join("")}`;
+      return `<p class="map-task-label" data-status="${status}">${STATUS_LABEL[status]} ${group.length}</p>${group.map(row).join("")}`;
     }
     const here = group.filter((task) => task.onMap);
     const elsewhere = group.filter((task) => !task.onMap);
-    return `<p class="map-task-label">${STATUS_LABEL.active} ${group.length}</p>
+    return `<p class="map-task-label" data-status="active">${STATUS_LABEL.active} ${group.length}</p>
       ${here.length ? `<p class="map-task-sub">本地图任务 ${here.length}</p>${here.map(row).join("")}` : ""}
       ${elsewhere.length ? `<p class="map-task-sub">非本地图任务 ${elsewhere.length}</p>${elsewhere.map(row).join("")}` : ""}`;
   }).join("");
