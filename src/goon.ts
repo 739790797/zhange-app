@@ -1,4 +1,4 @@
-import { mapTitle } from "./mapNames";
+import { mapTitle, sameMap } from "./mapNames";
 
 type Goon = { mapSlug: string; seenAt: string };
 
@@ -44,8 +44,12 @@ export function goonText(mapName: string) {
 
 export function paintGoonBars(nameOf: (slug: string) => string) {
   const slug = goon?.mapSlug || "";
-  const text = slug ? goonText(nameOf(slug)) : "";
+  const jump = slug ? goonText(nameOf(slug)) : "";
+  const here = slug ? goonHint() : "";
   document.querySelectorAll<HTMLButtonElement>(".goon-bar").forEach((node) => {
+    const onMap = node.classList.contains("map-goon");
+    const viewed = onMap ? node.closest(".map-app")?.querySelector("#map-root")?.getAttribute("data-slug") || "" : "";
+    const text = onMap ? (sameMap(viewed, slug) ? here : "") : jump;
     if (!text) {
       node.hidden = true;
       node.textContent = "";
@@ -53,8 +57,9 @@ export function paintGoonBars(nameOf: (slug: string) => string) {
       return;
     }
     node.hidden = false;
-    node.dataset.map = slug;
     node.textContent = text;
+    if (onMap) delete node.dataset.map;
+    else node.dataset.map = slug;
   });
 }
 

@@ -2,23 +2,29 @@ import { bindListSearch, listAllIcon, listBusy, listFail, listFrame, listIcon, l
 import { fadeIn, fadeOut } from "./motion";
 import { findMap, mapTitle, sameMap } from "./mapNames";
 
+type LobbySeat = {
+  userId: number;
+  name: string;
+  host: boolean;
+  mapSlug: string;
+  mapName: string;
+  status: string;
+};
+
 type LobbyRoom = {
   id: string;
   title: string;
-  mapSlug: string;
-  mapName: string;
-  thumb: string;
-  host: string;
+  seats: LobbySeat[];
   members: number;
   max: number;
   locked: boolean;
-  inRaid: boolean;
 };
 
 type MapOption = { slug: string; name: string; thumb: string };
 
 const PAGE = 20;
-const IN_RAID = new Set(["map_loading", "matching", "match_found", "raid_starting", "raid_started"]);
+const RAID_PHASE = new Set(["match_found", "raid_starting", "raid_started"]);
+const MATCH_PHASE = new Set(["map_loading", "matching"]);
 
 let seq = 0;
 let page = 1;
@@ -36,7 +42,14 @@ let draftPrivate = false;
 let draftPassword = "";
 let draftCode = "";
 let creating = false;
+let refreshing = false;
 let shownDialog = "";
+let releasing = "";
+let keepRoom: (id: string) => boolean = () => false;
+
+export function setLobbyRoomKeep(next: (id: string) => boolean) {
+  keepRoom = next;
+}
 
 function esc(value: string) {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
@@ -74,49 +87,48 @@ async function ensureHostName() {
   return hostName;
 }
 
-function hostInRaid(row: Record<string, unknown>) {
-  const hostId = Number(row.host_user_id ?? row.hostUserId ?? 0);
-  const direct = str(row.host_phase || row.hostPhase || row.phase_kind || row.phaseKind);
-  if (IN_RAID.has(direct)) return true;
-  const phases = Array.isArray(row.phases) ? row.phases : [];
-  for (const item of phases) {
-    const phase = rec(item);
-    if (!phase) continue;
-    const userId = Number(phase.user_id ?? phase.userId ?? 0);
-    if (hostId && userId !== hostId) continue;
-    if (!hostId && phase.is_host !== true && phase.isHost !== true) continue;
-    if (IN_RAID.has(str(phase.kind || phase.phase))) return true;
-  }
-  const members = Array.isArray(row.members) ? row.members : Array.isArray(row.occupants) ? row.occupants : [];
-  for (const item of members) {
-    const member = rec(item);
-    if (!member) continue;
-    const userId = Number(member.user_id ?? member.userId ?? 0);
-    const isHost = member.is_host === true || member.isHost === true || (hostId > 0 && userId === hostId);
-    if (!isHost) continue;
-    if (IN_RAID.has(str(member.phase || member.kind || member.raid_phase || member.phase_kind))) return true;
-  }
-  return false;
+function memberStatus(kind: string, mapSlug: string) {
+  if (RAID_PHASE.has(kind)) return "战局中";
+  if (MATCH_PHASE.has(kind)) return "匹配中";
+  if (mapSlug) return "观战中";
+  return "大厅中";
+}
+
+function readSeat(row: Record<string, unknown>, options: MapOption[], hostId: number): LobbySeat | null {
+  const userId = Number(row.user_id ?? row.userId ?? 0);
+  if (!userId) return null;
+  const mapSlug = str(row.map_slug || row.mapSlug);
+  const map = findMap(mapSlug, options);
+  const kind = str(row.phase_kind || row.phaseKind || row.kind || row.phase);
+  return {
+    userId,
+    name: str(row.display_name || row.displayName || row.name) || `用户${userId}`,
+    host: row.is_host === true || row.isHost === true || (hostId > 0 && userId === hostId),
+    mapSlug,
+    mapName: mapTitle(mapSlug, map?.name || "", "未选地图"),
+    status: memberStatus(kind, mapSlug),
+  };
 }
 
 function readRoom(row: Record<string, unknown>, options: MapOption[]): LobbyRoom | null {
   const id = str(row.public_id || row.publicId || row.id);
   if (!id || id === "solo") return null;
-  const mapSlug = str(row.map_slug || row.mapSlug);
-  const map = findMap(mapSlug, options);
-  const members = Number(row.member_count ?? row.memberCount ?? 0);
+  const hostId = Number(row.host_user_id ?? row.hostUserId ?? 0);
+  const people = Array.isArray(row.occupants) ? row.occupants : Array.isArray(row.members) ? row.members : [];
+  const seats = people.flatMap((item) => {
+    const member = rec(item);
+    const seat = member ? readSeat(member, options, hostId) : null;
+    return seat ? [seat] : [];
+  });
+  const members = Number(row.member_count ?? row.memberCount ?? seats.length);
   const max = Number(row.max_members ?? row.maxMembers ?? 0);
   return {
     id,
-    title: str(row.title) || "房间",
-    mapSlug,
-    mapName: mapTitle(mapSlug, map?.name || "", "未选地图"),
-    thumb: map?.thumb || str(row.thumb_link || row.thumbLink),
-    host: str(row.host_display_name || row.hostName || row.host_name),
-    members: Number.isFinite(members) ? members : 0,
+    title: str(row.title) || str(row.host_display_name || row.hostName) || "房间",
+    seats,
+    members: Number.isFinite(members) ? members : seats.length,
     max: Number.isFinite(max) ? max : 0,
     locked: row.listed === false || row.has_password === true || row.hasPassword === true,
-    inRaid: hostInRaid(row),
   };
 }
 
@@ -126,10 +138,11 @@ export function lobbyShell() {
 
 function render() {
   const listed = rooms.filter((room) => {
-    if (mapFilter && !sameMap(room.mapSlug, mapFilter)) return false;
+    if (mapFilter && !room.seats.some((seat) => sameMap(seat.mapSlug, mapFilter))) return false;
     if (!query.trim()) return true;
     const needle = query.trim().toLowerCase();
-    return `${room.title} ${room.host} ${room.mapName}`.toLowerCase().includes(needle);
+    const hay = [room.title, ...room.seats.flatMap((seat) => [seat.name, seat.mapName, seat.status])].join(" ").toLowerCase();
+    return hay.includes(needle);
   });
   const side = [
     listItem("全部", !mapFilter, `data-lobby-map=""`, listAllIcon()),
@@ -137,19 +150,28 @@ function render() {
   ].join("");
   const body = listed.map((room) => {
     const full = room.max > 0 && room.members >= room.max;
-    const thumb = room.thumb ? `<img class="lobby-thumb" src="${esc(room.thumb)}" alt="" />` : `<i class="lobby-thumb"></i>`;
-    return `<tr class="lobby-row" data-lobby-join="${esc(room.id)}" data-lobby-locked="${room.locked ? "1" : "0"}"${full ? ` data-lobby-full="1"` : ""}>
-      <td>${thumb}</td>
-      <td>${esc(room.mapName)}</td>
-      <td>${room.locked ? "私人" : "公开"}</td>
-      <td>${esc(room.host || "—")}</td>
-      <td>${room.inRaid ? "战局中" : "大厅中"}</td>
-      <td class="num">${room.members}${room.max ? ` / ${room.max}` : ""}</td>
-      <td class="lobby-act"><button type="button" class="lobby-join" data-lobby-join-btn ${full ? "disabled" : ""}>加入</button></td>
-    </tr>`;
+    const seats = room.seats.length ? room.seats : [{ userId: 0, name: "—", host: false, mapSlug: "", mapName: "未选地图", status: "大厅中" }];
+    const span = seats.length;
+    const rows = seats.map((seat, index) => {
+      const merged = index === 0
+        ? `<td class="lobby-merge" rowspan="${span}">${esc(room.title)}</td>`
+        : "";
+      const tail = index === 0
+        ? `<td class="num lobby-merge" rowspan="${span}">${room.members}${room.max ? ` / ${room.max}` : ""}</td><td class="lobby-act lobby-merge" rowspan="${span}"><button type="button" class="lobby-join" data-lobby-join-btn ${full ? "disabled" : ""}>加入</button></td>`
+        : "";
+      const statusClass = seat.status === "战局中" ? "is-raid" : seat.status === "观战中" ? "is-watch" : seat.status === "匹配中" ? "is-match" : "is-lobby";
+      return `<tr>
+        ${merged}
+        <td>${esc(seat.mapName)}</td>
+        <td>${seat.host ? `<span class="lobby-host" aria-hidden="true">⭐</span>` : ""}${esc(seat.name)}</td>
+        <td class="lobby-status ${statusClass}">${esc(seat.status)}</td>
+        ${tail}
+      </tr>`;
+    }).join("");
+    return `<tbody class="lobby-room" data-lobby-join="${esc(room.id)}" data-lobby-locked="${room.locked ? "1" : "0"}"${full ? ` data-lobby-full="1"` : ""}>${rows}</tbody>`;
   }).join("");
   const table = listed.length
-    ? `<table class="tarkov-list-table"><thead><tr><th>地图缩略图</th><th>地图名称</th><th>隐私</th><th>房主</th><th>状态</th><th class="num">人数</th><th class="lobby-act">加入</th></tr></thead><tbody>${body}</tbody></table>`
+    ? `<table class="tarkov-list-table lobby-table"><thead><tr><th>房间标题</th><th>地图名称</th><th>成员</th><th>状态</th><th class="num">人数</th><th class="lobby-act">加入</th></tr></thead>${body}</table>`
     : `<p class="tarkov-list-empty">没有房间。</p>`;
   const pager = pages > 1
     ? `<div class="tarkov-list-pager"><button type="button" data-lobby-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><span>${page} / ${pages}</span><button type="button" data-lobby-page="${page + 1}" ${page >= pages ? "disabled" : ""}>下一页</button></div>`
@@ -162,8 +184,8 @@ function render() {
   const alert = note && !dialog ? `<p class="wiki-note">${esc(note)}</p>` : "";
   return listFrame({
     side,
-    filters: `<div class="tarkov-list-kinds"><button type="button" data-lobby-create>创建房间</button></div>`,
-    search: { id: "lobby-find", value: query, placeholder: "搜索房间 / 房主", label: "搜索房间" },
+    filters: `<div class="tarkov-list-kinds"><button type="button" data-lobby-create>创建房间</button><button type="button" data-lobby-refresh ${refreshing ? "disabled" : ""}>${refreshing ? "刷新中…" : "刷新"}</button></div>`,
+    search: { id: "lobby-find", value: query, placeholder: "搜索房间 / 成员", label: "搜索房间" },
     panel: `${alert}${table}${pager}${dialogHtml}`,
   });
 }
@@ -228,6 +250,12 @@ function bind() {
       void mountLobby();
     });
   });
+  host.querySelector("[data-lobby-refresh]")?.addEventListener("click", () => {
+    if (refreshing) return;
+    refreshing = true;
+    paint();
+    void mountLobby(true);
+  });
   host.querySelector("[data-lobby-create]")?.addEventListener("click", () => {
     void ensureHostName().then(() => {
       draftTitle = defaultTitle();
@@ -262,7 +290,7 @@ function bind() {
       if (row) enter(row);
     });
   });
-  host.querySelectorAll<HTMLTableRowElement>("[data-lobby-join]").forEach((row) => {
+  host.querySelectorAll<HTMLElement>("[data-lobby-join]").forEach((row) => {
     row.addEventListener("click", () => enter(row));
   });
   host.querySelector("#lobby-code")?.addEventListener("submit", (event) => {
@@ -344,6 +372,32 @@ function bind() {
   });
 }
 
+async function releaseUnpickedMine(mine: Record<string, unknown> | null) {
+  if (!mine) return "";
+  const id = str(mine.public_id || mine.publicId);
+  const count = Number(mine.member_count ?? mine.memberCount ?? 0);
+  const member = mine.is_member === true || mine.isMember === true;
+  if (!id || !member || !Number.isFinite(count) || count > 1 || releasing === id || keepRoom(id)) return "";
+  const detail = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/raid-rooms/${id}` }).catch(() => null);
+  const row = rec(detail);
+  if (!row) return "";
+  const views = Array.isArray(row.view_maps) ? row.view_maps : Array.isArray(row.viewMaps) ? row.viewMaps : [];
+  const picked = views.some((item) => {
+    const view = rec(item);
+    return Boolean(str(view?.map_slug || view?.mapSlug));
+  });
+  if (picked) return "";
+  releasing = id;
+  try {
+    await invoke("site_post", { path: `/guides/tarkov/raid-rooms/${id}/leave`, body: {} });
+    return id;
+  } catch {
+    return "";
+  } finally {
+    if (releasing === id) releasing = "";
+  }
+}
+
 export async function mountLobby(quiet = false) {
   const token = ++seq;
   const host = document.querySelector<HTMLElement>("#lobby");
@@ -355,11 +409,16 @@ export async function mountLobby(quiet = false) {
   if (mapFilter) params.set("map", mapFilter);
   if (query) params.set("q", query);
   try {
-    const [roomData, mapData] = await Promise.all([
-      invoke<{ items?: unknown; rooms?: unknown; total?: number }>("site_get", { path: `/guides/tarkov/raid-rooms?${params.toString()}` }),
-      invoke<{ items?: { slug?: string; name?: string; thumb_link?: string; thumbLink?: string }[] }>("site_get", { path: "/guides/tarkov/maps" }).catch(() => ({ items: [] })),
-    ]);
+    let roomData = await invoke<{ items?: unknown; rooms?: unknown; total?: number; mine?: unknown }>("site_get", { path: `/guides/tarkov/raid-rooms?${params.toString()}` });
+    const mapData = await invoke<{ items?: { slug?: string; name?: string; thumb_link?: string; thumbLink?: string }[] }>("site_get", { path: "/guides/tarkov/maps" }).catch(() => ({ items: [] }));
     if (token !== seq || !document.querySelector("#lobby")) return;
+    const dropped = await releaseUnpickedMine(rec(roomData.mine));
+    if (token !== seq || !document.querySelector("#lobby")) return;
+    if (dropped) {
+      window.dispatchEvent(new CustomEvent("zhange-drop-room", { detail: { id: dropped } }));
+      roomData = await invoke<{ items?: unknown; rooms?: unknown; total?: number; mine?: unknown }>("site_get", { path: `/guides/tarkov/raid-rooms?${params.toString()}` });
+      if (token !== seq || !document.querySelector("#lobby")) return;
+    }
     maps = (mapData.items || []).flatMap((item) => {
       const slug = str(item.slug);
       const name = str(item.name) || slug;
@@ -374,9 +433,11 @@ export async function mountLobby(quiet = false) {
     const total = Number(roomData.total);
     pages = Number.isFinite(total) && total >= 0 ? Math.max(1, Math.ceil(total / PAGE)) : 1;
     if (page > pages) page = pages;
+    refreshing = false;
     paint();
   } catch (error) {
     if (token !== seq) return;
+    refreshing = false;
     const live = document.querySelector<HTMLElement>("#lobby");
     if (!live) return;
     listFail(live, error instanceof Error ? error.message : "联机大厅读取失败");

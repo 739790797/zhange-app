@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -76,10 +76,13 @@ pub struct WatchState {
     pub location: String,
     pub phase: String,
     pub raid_id: String,
+    pub ready: bool,
+    pub tail_stamp: String,
 }
 
 struct Live {
     running: bool,
+    ready: bool,
     session: String,
     application: String,
     notices: String,
@@ -88,6 +91,7 @@ struct Live {
 
 static LIVE: Mutex<Live> = Mutex::new(Live {
     running: false,
+    ready: false,
     session: String::new(),
     application: String::new(),
     notices: String::new(),
@@ -110,12 +114,81 @@ pub fn state() -> WatchState {
         location: snap.location.clone(),
         phase: snap.phase.clone(),
         raid_id: snap.raid_id.clone(),
+        ready: live.ready,
+        tail_stamp: tail_stamp(&live),
     }
 }
 
-fn publish(running: bool, session: &str, application: &Path, notices: &Path, backend: &Path) {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogTails {
+    pub application: String,
+    pub notices: String,
+    pub backend: String,
+}
+
+pub fn tails() -> LogTails {
+    let (application, notices, backend) = {
+        let live = LIVE.lock().expect("log-watch-live");
+        (live.application.clone(), live.notices.clone(), live.backend.clone())
+    };
+    LogTails {
+        application: tail_text(Path::new(&application)),
+        notices: tail_text(Path::new(&notices)),
+        backend: tail_text(Path::new(&backend)),
+    }
+}
+
+fn tail_text(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        return String::new();
+    }
+    const CAP: u64 = 128 * 1024;
+    let Ok(meta) = fs::metadata(path) else { return String::new() };
+    let Ok(mut file) = File::open(path) else { return String::new() };
+    let start = meta.len().saturating_sub(CAP);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if file.take(CAP).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    if start > 0 {
+        if let Some(index) = buf.iter().position(|byte| *byte == b'\n') {
+            buf.drain(..=index);
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn file_stamp(path: &str) -> String {
+    if path.is_empty() {
+        return "0:0".into();
+    }
+    let Ok(meta) = fs::metadata(path) else { return "0:0".into() };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|time| time.as_millis())
+        .unwrap_or(0);
+    format!("{}:{modified}", meta.len())
+}
+
+fn tail_stamp(live: &Live) -> String {
+    format!(
+        "{}|{}|{}",
+        file_stamp(&live.application),
+        file_stamp(&live.notices),
+        file_stamp(&live.backend)
+    )
+}
+
+fn publish(running: bool, ready: bool, session: &str, application: &Path, notices: &Path, backend: &Path) {
     *LIVE.lock().expect("log-watch-live") = Live {
         running,
+        ready,
         session: session.to_string(),
         application: application.display().to_string(),
         notices: notices.display().to_string(),
@@ -144,80 +217,109 @@ fn watch(app: AppHandle) {
     let mut notices = Tail::new();
     let mut backend = Tail::new();
     let mut primed = false;
+    let mut was_running = false;
     loop {
-        if game_running() {
-            let root = crate::local::get_paths(&app).log_dir;
-            if let Some(dir) = newest_session(Path::new(root.trim())) {
-                let key = dir.to_string_lossy().to_string();
-                if key != session {
-                    session = key;
-                    primed = false;
-                    application = Tail::new();
-                    notices = Tail::new();
-                    backend = Tail::new();
+        let running = game_running();
+        let root = crate::local::get_paths(&app).log_dir;
+        if let Some(dir) = newest_session(Path::new(root.trim())) {
+            let key = dir.to_string_lossy().to_string();
+            if key != session {
+                if !session.is_empty() && was_running {
+                    end_raid(&app);
                 }
-                if let Some(path) = newest_log(&dir, "application") {
-                    if application.path != path {
-                        application = Tail::at_end(&path);
-                        primed = false;
-                    }
-                }
-                if let Some(path) = newest_log(&dir, "notification") {
-                    if notices.path != path {
-                        notices = Tail::at_end(&path);
-                    }
-                }
-                if let Some(path) = newest_log(&dir, "backend") {
-                    if backend.path != path {
-                        backend = Tail::at_end(&path);
-                    }
-                }
-                if !primed {
-                    prime(&app, &application.path);
-                    primed = true;
-                }
-                if let Some(text) = application.read_new() {
-                    apply_lines(&app, &text, true);
-                }
-                if let Some(text) = notices.read_new() {
-                    apply_lines(&app, &text, true);
-                }
-                if let Some(text) = backend.read_new() {
-                    apply_lines(&app, &text, true);
-                }
+                session = key;
+                primed = false;
+                reset_snap();
+                application = Tail::new();
+                notices = Tail::new();
+                backend = Tail::new();
             }
-            publish(true, &session, &application.path, &notices.path, &backend.path);
-        } else if !session.is_empty() {
-            session.clear();
-            primed = false;
-            application = Tail::new();
-            notices = Tail::new();
-            backend = Tail::new();
-            end_raid(&app);
-            publish(false, "", &application.path, &notices.path, &backend.path);
+            if !primed {
+                let apps = ordered_logs(&dir, "application");
+                let notes = ordered_logs(&dir, "notification");
+                let backs = ordered_logs(&dir, "backend");
+                publish(
+                    running,
+                    false,
+                    &session,
+                    apps.last().map(PathBuf::as_path).unwrap_or(Path::new("")),
+                    notes.last().map(PathBuf::as_path).unwrap_or(Path::new("")),
+                    backs.last().map(PathBuf::as_path).unwrap_or(Path::new("")),
+                );
+                replay_mode(&app, &apps);
+                application = replay_into(&app, &apps);
+                notices = replay_into(&app, &notes);
+                backend = replay_into(&app, &backs);
+                primed = true;
+                if running {
+                    catch_up(&app);
+                } else {
+                    park_offline();
+                }
+            } else {
+                let app_path = newest_log(&dir, "application").unwrap_or_default();
+                let note_path = newest_log(&dir, "notification").unwrap_or_default();
+                let back_path = newest_log(&dir, "backend").unwrap_or_default();
+                follow_file(&mut application, &app_path, &app, running);
+                follow_file(&mut notices, &note_path, &app, running);
+                follow_file(&mut backend, &back_path, &app, running);
+            }
+            if was_running && !running {
+                end_raid(&app);
+            }
+            publish(running, true, &session, &application.path, &notices.path, &backend.path);
         } else {
-            publish(false, "", &application.path, &notices.path, &backend.path);
+            if was_running {
+                end_raid(&app);
+            }
+            publish(false, true, "", Path::new(""), Path::new(""), Path::new(""));
         }
+        was_running = running;
         thread::sleep(Duration::from_millis(700));
     }
 }
 
-fn prime(app: &AppHandle, path: &Path) {
-    if path.as_os_str().is_empty() {
-        return;
+fn reset_snap() {
+    *SNAP.lock().expect("log-watch") = Snap {
+        in_raid: false,
+        started: None,
+        server: String::new(),
+        location: String::new(),
+        slug: String::new(),
+        mode: String::new(),
+        phase: String::new(),
+        raid_id: String::new(),
+    };
+}
+
+fn phase_open(phase: &str) -> bool {
+    matches!(phase, "map_loading" | "matching" | "match_found" | "raid_starting" | "raid_started")
+}
+
+fn clear_place(snap: &mut Snap) {
+    snap.slug.clear();
+    snap.location.clear();
+    snap.server.clear();
+    snap.raid_id.clear();
+}
+
+fn park_offline() {
+    let mut snap = SNAP.lock().expect("log-watch");
+    let active = snap.in_raid || snap.started.is_some() || phase_open(&snap.phase);
+    snap.in_raid = false;
+    snap.started = None;
+    clear_place(&mut snap);
+    if active {
+        snap.phase = "raid_exited".into();
+    } else if snap.phase != "raid_exited" && snap.phase != "matching_aborted" {
+        snap.phase.clear();
     }
-    let Some(head) = read_slice(path, 0, 128 * 1024) else { return };
-    let len = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    let tail_from = len.saturating_sub(512 * 1024);
-    apply_lines(app, &head, false);
-    if tail_from > 128 * 1024 {
-        if let Some(tail) = read_slice(path, tail_from, 512 * 1024) {
-            apply_lines(app, &tail, false);
-        }
-    }
-    let (slug, mode) = {
+}
+
+fn catch_up(app: &AppHandle) {
+    let (slug, mode, phase, raid_id) = {
         let snap = SNAP.lock().expect("log-watch");
-        (snap.slug.clone(), snap.mode.clone())
+        (snap.slug.clone(), snap.mode.clone(), snap.phase.clone(), snap.raid_id.clone())
     };
     if !slug.is_empty() {
         emit(app, "map", &slug, "", "", "");
@@ -225,14 +327,225 @@ fn prime(app: &AppHandle, path: &Path) {
     if !mode.is_empty() {
         emit(app, "mode", "", &mode, "", "");
     }
+    if !phase.is_empty() {
+        emit_phase(app, &phase, &slug, &raid_id);
+    }
 }
 
-fn read_slice(path: &Path, offset: u64, max: u64) -> Option<String> {
+fn replay_into(app: &AppHandle, paths: &[PathBuf]) -> Tail {
+    let Some(last) = paths.last() else { return Tail::new() };
+    let start = paths.len().saturating_sub(2);
+    for path in &paths[start..paths.len() - 1] {
+        replay_file(app, path);
+    }
+    let offset = replay_file(app, last);
+    Tail { path: last.clone(), offset, pending: String::new() }
+}
+
+fn replay_mode(app: &AppHandle, paths: &[PathBuf]) {
+    for path in paths.iter().rev() {
+        let Ok(len) = fs::metadata(path).map(|meta| meta.len()) else { continue };
+        let Some(at) = rfind(path, len, b"Session mode:") else { continue };
+        let Some(line) = read_line_at(path, at) else { continue };
+        apply_lines(app, &line, false);
+        return;
+    }
+}
+
+fn replay_file(app: &AppHandle, path: &Path) -> u64 {
+    let Ok(len) = fs::metadata(path).map(|meta| meta.len()) else { return 0 };
+    if len == 0 {
+        return 0;
+    }
+    let start = decisive_start(path, len);
+    apply_range(app, path, start, len);
+    len
+}
+
+fn decisive_start(path: &Path, len: u64) -> u64 {
+    const FLOOR: u64 = 512 * 1024;
+    if len <= FLOOR {
+        return 0;
+    }
+    let Some((at, open)) = latest_decisive(path, len) else {
+        return len.saturating_sub(FLOOR);
+    };
+    if !open {
+        return at.saturating_sub(64 * 1024);
+    }
+    let region = at.saturating_sub(4 * 1024 * 1024);
+    let scene = rfind_in(path, region, at, b"scene preset path:");
+    scene.unwrap_or(at).saturating_sub(2048)
+}
+
+fn latest_decisive(path: &Path, len: u64) -> Option<(u64, bool)> {
+    const CHUNK: u64 = 1024 * 1024;
+    const OVERLAP: u64 = 48;
+    let exits: [&[u8]; 7] = [
+        b"UserMatchOver",
+        b"Network game matching aborted",
+        b"Network game matching cancelled",
+        b"empty_preset",
+        b"hideout_preset",
+        b"/hideout",
+        b"\\hideout",
+    ];
+    let mut end = len;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let Some(buf) = read_range(path, start, end - start) else { break };
+        let mut found: Option<(usize, bool)> = None;
+        if let Some(pos) = buf.windows(b"GameStarted:".len()).rposition(|window| window == b"GameStarted:") {
+            found = Some((pos, true));
+        }
+        for needle in exits {
+            if let Some(pos) = buf.windows(needle.len()).rposition(|window| window == needle) {
+                if found.is_none_or(|(at, _)| pos > at) {
+                    found = Some((pos, false));
+                }
+            }
+        }
+        if let Some((pos, open)) = found {
+            return Some((start + pos as u64, open));
+        }
+        if start == 0 {
+            break;
+        }
+        end = start + OVERLAP;
+    }
+    None
+}
+
+fn rfind(path: &Path, len: u64, needle: &[u8]) -> Option<u64> {
+    const CHUNK: u64 = 1024 * 1024;
+    if needle.is_empty() || len == 0 {
+        return None;
+    }
+    let overlap = (needle.len() as u64).saturating_sub(1);
+    let mut end = len;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let buf = read_range(path, start, end - start)?;
+        if let Some(pos) = buf.windows(needle.len()).rposition(|window| window == needle) {
+            return Some(start + pos as u64);
+        }
+        if start == 0 {
+            break;
+        }
+        end = start + overlap.max(1);
+    }
+    None
+}
+
+fn rfind_in(path: &Path, from: u64, to: u64, needle: &[u8]) -> Option<u64> {
+    if needle.is_empty() || to <= from {
+        return None;
+    }
+    let buf = read_range(path, from, to - from)?;
+    buf.windows(needle.len())
+        .rposition(|window| window == needle)
+        .map(|pos| from + pos as u64)
+}
+
+fn read_line_at(path: &Path, at: u64) -> Option<String> {
+    let start = at.saturating_sub(240);
+    let buf = read_range(path, start, 640)?;
+    let text = String::from_utf8_lossy(&buf);
+    let rel = (at - start) as usize;
+    if rel > text.len() {
+        return None;
+    }
+    let before = text[..rel].rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let after = text[rel..].find('\n').map(|index| rel + index).unwrap_or(text.len());
+    let line = text[before..after].trim();
+    if line.is_empty() { None } else { Some(line.to_string()) }
+}
+
+fn read_range(path: &Path, start: u64, max: u64) -> Option<Vec<u8>> {
+    if max == 0 {
+        return Some(Vec::new());
+    }
     let mut file = File::open(path).ok()?;
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut buf = vec![0u8; max as usize];
-    let read = file.read(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf[..read]).into_owned())
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = vec![0u8; max.min(8 * 1024 * 1024) as usize];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(_) => return None,
+        }
+    }
+    buf.truncate(filled);
+    Some(buf)
+}
+
+fn apply_range(app: &AppHandle, path: &Path, start: u64, end: u64) {
+    if end <= start {
+        return;
+    }
+    let Ok(mut file) = File::open(path) else { return };
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return;
+    }
+    let mut pending = String::new();
+    let mut left = end - start;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut skipping = start > 0;
+    while left > 0 {
+        let want = ((left as usize).min(buf.len())).max(1);
+        let Ok(read) = file.read(&mut buf[..want]) else { break };
+        if read == 0 {
+            break;
+        }
+        left = left.saturating_sub(read as u64);
+        pending.push_str(&String::from_utf8_lossy(&buf[..read]));
+        if skipping {
+            if let Some(index) = pending.find('\n') {
+                pending.drain(..=index);
+                skipping = false;
+            } else {
+                pending.clear();
+                continue;
+            }
+        }
+        if let Some(split) = pending.rfind('\n') {
+            let done = pending[..=split].to_string();
+            pending = pending[split + 1..].to_string();
+            if !done.is_empty() {
+                apply_lines(app, &done, false);
+            }
+        }
+    }
+    if !skipping && !pending.is_empty() {
+        apply_lines(app, &pending, false);
+    }
+}
+
+fn follow_file(tail: &mut Tail, path: &Path, app: &AppHandle, live: bool) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    if tail.path != path {
+        if live {
+            if let Some(text) = tail.read_new() {
+                apply_lines(app, &text, true);
+            }
+        }
+        let offset = if live { 0 } else { replay_file(app, path) };
+        *tail = Tail { path: path.to_path_buf(), offset, pending: String::new() };
+        if live {
+            if let Some(text) = tail.read_new() {
+                apply_lines(app, &text, true);
+            }
+        }
+        return;
+    }
+    if live {
+        if let Some(text) = tail.read_new() {
+            apply_lines(app, &text, true);
+        }
+    }
 }
 
 fn apply_lines(app: &AppHandle, text: &str, live: bool) {
@@ -323,7 +636,7 @@ fn apply_lines(app: &AppHandle, text: &str, live: bool) {
                 snap = SNAP.lock().expect("log-watch");
             }
         }
-        if line.contains("Got notification | UserMatchOver") {
+        if line.contains("Got notification | UserMatchOver") || is_local_match_end(line) {
             let ended = snap.in_raid;
             let changed = ended || !snap.slug.is_empty() || snap.phase != "raid_exited";
             if changed {
@@ -386,15 +699,17 @@ fn apply_lines(app: &AppHandle, text: &str, live: bool) {
 
 fn end_raid(app: &AppHandle) {
     let mut snap = SNAP.lock().expect("log-watch");
-    if !snap.in_raid && snap.started.is_none() {
-        snap.slug.clear();
-        return;
-    }
+    let active = snap.in_raid || snap.started.is_some() || phase_open(&snap.phase);
     snap.in_raid = false;
     snap.started = None;
-    snap.slug.clear();
+    clear_place(&mut snap);
+    if active {
+        snap.phase = "raid_exited".into();
+    }
     drop(snap);
-    emit(app, "raid-end", "", "", "", "");
+    if active {
+        emit(app, "raid-end", "", "", "", "");
+    }
 }
 
 fn short_id(line: &str) -> String {
@@ -434,11 +749,6 @@ fn emit_full(app: &AppHandle, kind: &str, slug: &str, mode: &str, quest_kind: &s
 impl Tail {
     fn new() -> Self {
         Self { path: PathBuf::new(), offset: 0, pending: String::new() }
-    }
-
-    fn at_end(path: &Path) -> Self {
-        let offset = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        Self { path: path.to_path_buf(), offset, pending: String::new() }
     }
 
     fn read_new(&mut self) -> Option<String> {
@@ -484,44 +794,61 @@ fn newest_session(root: &Path) -> Option<PathBuf> {
     }
     let mut best: Option<(SystemTime, PathBuf)> = None;
     let mut consider = |dir: PathBuf| {
-        let stamp = dir_stamp(&dir);
-        if best.as_ref().is_none_or(|(time, _)| stamp > *time) {
+        let Some(stamp) = direct_log_stamp(&dir, "application") else { return };
+        if best.as_ref().is_none_or(|(time, _)| stamp >= *time) {
             best = Some((stamp, dir));
         }
     };
-    if newest_log(root, "application").is_some() {
-        consider(root.to_path_buf());
-    }
-    let read = fs::read_dir(root).ok()?;
+    consider(root.to_path_buf());
+    let Ok(read) = fs::read_dir(root) else {
+        return best.map(|item| item.1);
+    };
     for entry in read.flatten() {
         let path = entry.path();
-        if path.is_dir() && newest_log(&path, "application").is_some() {
+        if path.is_dir() {
             consider(path);
         }
     }
     best.map(|item| item.1)
 }
 
-fn dir_stamp(dir: &Path) -> SystemTime {
-    newest_log(dir, "application")
-        .and_then(|path| fs::metadata(path).ok())
-        .and_then(|meta| meta.modified().ok())
-        .unwrap_or(SystemTime::UNIX_EPOCH)
+fn direct_log_stamp(dir: &Path, kind: &str) -> Option<SystemTime> {
+    let mut best: Option<SystemTime> = None;
+    let read = fs::read_dir(dir).ok()?;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_kind(&path, kind) {
+            continue;
+        }
+        let Ok(modified) = fs::metadata(&path).and_then(|meta| meta.modified()) else { continue };
+        if best.is_none_or(|time| modified > time) {
+            best = Some(modified);
+        }
+    }
+    best
 }
 
 fn newest_log(dir: &Path, kind: &str) -> Option<PathBuf> {
-    let mut best: Option<(SystemTime, PathBuf)> = None;
+    collect_logs(dir, kind).into_iter().max_by_key(|(time, _)| *time).map(|item| item.1)
+}
+
+fn ordered_logs(dir: &Path, kind: &str) -> Vec<PathBuf> {
+    let mut found = collect_logs(dir, kind);
+    found.sort_by_key(|(time, _)| *time);
+    found.into_iter().map(|item| item.1).collect()
+}
+
+fn collect_logs(dir: &Path, kind: &str) -> Vec<(SystemTime, PathBuf)> {
+    let mut found = Vec::new();
     let mut consider = |path: PathBuf| {
         if !is_kind(&path, kind) {
             return;
         }
         let Ok(meta) = fs::metadata(&path) else { return };
         let Ok(modified) = meta.modified() else { return };
-        if best.as_ref().is_none_or(|(time, _)| modified > *time) {
-            best = Some((modified, path));
-        }
+        found.push((modified, path));
     };
-    let read = fs::read_dir(dir).ok()?;
+    let Ok(read) = fs::read_dir(dir) else { return found };
     for entry in read.flatten() {
         let path = entry.path();
         if path.is_file() {
@@ -536,7 +863,7 @@ fn newest_log(dir: &Path, kind: &str) -> Option<PathBuf> {
             }
         }
     }
-    best.map(|item| item.1)
+    found
 }
 
 fn is_kind(path: &Path, kind: &str) -> bool {
@@ -575,6 +902,10 @@ fn scene_slug(line: &str) -> Option<String> {
     let file = token.rsplit(['/', '\\']).next().unwrap_or(token);
     let stem = file.split("_preset").next().unwrap_or(file).trim_end_matches(".bundle");
     location_slug(stem)
+}
+
+fn is_local_match_end(line: &str) -> bool {
+    line.contains("---> Request") && line.contains("/client/match/local/end")
 }
 
 fn is_hideout(line: &str) -> bool {
@@ -773,10 +1104,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_match_end_is_the_request() {
+        let request = "2026-09-28 21:51:44.787|Info|backend|---> Request HTTPS, id [106]: URL: https://gw-pve.escapefromtarkov.ru/client/match/local/end. ";
+        let response = "2026-09-28 21:51:45.864|Info|backend|<--- Response HTTPS, id [106]: URL: https://gw-pve.escapefromtarkov.ru/client/match/local/end, DownloadSeconds: 1.062";
+        assert!(is_local_match_end(request));
+        assert!(!is_local_match_end(response));
+        assert!(!is_local_match_end("URL: https://gw-pve.escapefromtarkov.ru/client/match/local/start. "));
+    }
+
+    #[test]
     fn reads_scene_and_mode() {
         let line = "2026-09-11 23:54:47.158|Info|application|scene preset path:maps/factory_night_preset.bundle rcid:factory_night";
         assert_eq!(scene_slug(line).as_deref(), Some("night-factory"));
         assert_eq!(session_mode("Session mode: Pve").as_deref(), Some("pve"));
         assert_eq!(location_slug("TarkovStreets").as_deref(), Some("streets-of-tarkov"));
+    }
+
+    #[test]
+    fn newest_session_is_latest_launch() {
+        let root = std::env::temp_dir().join(format!("zhange-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let older = root.join("log_2026.01.01_00.00.00");
+        let newer = root.join("log_2026.09.28_20.00.00");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(older.join("application.log"), "old").unwrap();
+        fs::write(newer.join("application.log"), "Session mode: Pve\n").unwrap();
+        fs::write(newer.join("backend.log"), "backend").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(older.join("application.log"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(newer.join("application.log"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_758_000_000))
+            .unwrap();
+        let found = newest_session(&root).unwrap();
+        assert_eq!(found, newer);
+        let logs = ordered_logs(&newer, "application");
+        assert_eq!(logs.len(), 1);
+        assert!(newest_log(&newer, "backend").unwrap().ends_with("backend.log"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tail_keeps_the_end() {
+        let root = std::env::temp_dir().join(format!("zhange-tail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("application.log");
+        let mut body = String::new();
+        for index in 0..8000 {
+            body.push_str(&format!("line-{index:04} padding-padding-padding\n"));
+        }
+        fs::write(&path, &body).unwrap();
+        let text = tail_text(&path);
+        assert!(text.contains("line-7999"));
+        assert!(!text.contains("line-0000"));
+        assert!(text.starts_with("line-"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn decisive_window_keeps_the_open_raid() {
+        let root = std::env::temp_dir().join(format!("zhange-decisive-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("application.log");
+        let mut body = String::new();
+        body.push_str(&"x".repeat(900_000));
+        body.push_str("\nGameStarted: old\nUserMatchOver\n");
+        body.push_str(&"y".repeat(900_000));
+        body.push_str("\nscene preset path:maps/bigmap_preset.bundle rcid:bigmap\nGameStarted: now\n");
+        fs::write(&path, &body).unwrap();
+        let len = fs::metadata(&path).unwrap().len();
+        let start = decisive_start(&path, len);
+        let slice = String::from_utf8(read_range(&path, start, len - start).unwrap()).unwrap();
+        assert!(slice.contains("GameStarted: now"));
+        assert!(slice.contains("bigmap_preset"));
+        assert!(!slice.contains("GameStarted: old"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

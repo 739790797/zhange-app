@@ -1,28 +1,33 @@
 import { colorForUserId } from "./questOverlay";
 import { goonHint, goonSlug } from "./goon";
-import { mapTitle, sameMap } from "./mapNames";
+import { findMap, mapTitle, sameMap } from "./mapNames";
 import { isPending, spin } from "./spinner";
 
 type MapPick = { slug: string; name: string; thumbLink: string };
-type Member = { userId: number; name: string };
-type Cell = { userId: number; count: number; uploaded: boolean };
-type TaskHit = { id: string; name: string; traderSlug: string; userIds: number[] };
-type Row = { mapSlug: string; withTasks: number; cells: Cell[]; tasks: TaskHit[] };
+type Member = { userId: number; name: string; host: boolean; online: boolean };
+type Phase = { userId: number; kind: string; mapId: string };
+type Seat = "raid" | "matching" | "watch";
+type Person = Member & { seat: Seat };
+type Board = { lobby: Member[]; matching: Member[]; maps: { mapId: string; people: Person[] }[] };
 
-let note = "正在读取任务数量";
+let note = "正在读取房间";
 let members: Member[] = [];
-let rows: Row[] = [];
-let unsynced: string[] = [];
-let catalogGap = false;
+let phases: Phase[] = [];
+let phaseRoomId = "";
+let loadedRoomId = "";
+let lastOnline: Set<number> | null = null;
+let socketLive = false;
+let viewerId = 0;
+let localKind = "";
+let localMapId = "";
+let localWatch = "";
+let viewByUser = new Map<number, string>();
 let ready = false;
-let pickHost = true;
+let canPick = true;
 let currentSlug = "";
-let overlapOrder: string[] = [];
-let previewSlug = "";
-let previewTouched = false;
+let shownMaps: MapPick[] = [];
 let generation = 0;
 let inflight: Promise<Record<string, unknown> | null> | null = null;
-let cachedRoom: Record<string, unknown> | null = null;
 
 function esc(value: string) {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
@@ -48,6 +53,225 @@ function unwrapRoom(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function memberOf(row: Record<string, unknown>): Member | null {
+  const userId = Number(row.user_id || row.userId || 0);
+  if (!userId) return null;
+  const name = String(row.display_name || row.displayName || row.name || "").trim() || `用户${userId}`;
+  return {
+    userId,
+    name,
+    host: Boolean(row.is_host || row.isHost),
+    online: Boolean(row.online),
+  };
+}
+
+function peopleOf(raw: Record<string, unknown> | null): Member[] {
+  if (!raw) return [];
+  const membersRaw = Array.isArray(raw.members) ? raw.members : [];
+  const occupants = Array.isArray(raw.occupants) ? raw.occupants : [];
+  const inRoom = membersRaw.filter((item) => {
+    const row = rec(item);
+    return row ? row.in_room !== false && row.inRoom !== false : false;
+  });
+  const source = inRoom.length ? inRoom : occupants;
+  const people = source.flatMap((item) => {
+    const row = rec(item);
+    return row ? [memberOf(row)].filter((person): person is Member => Boolean(person)) : [];
+  });
+  if (!lastOnline) return people;
+  return people.map((person) => ({ ...person, online: lastOnline?.has(person.userId) || person.online }));
+}
+
+function isMember(raw: Record<string, unknown>) {
+  if ("is_member" in raw) return Boolean(raw.is_member);
+  if ("isMember" in raw) return Boolean(raw.isMember);
+  return true;
+}
+
+function viewRows(raw: Record<string, unknown>) {
+  return Array.isArray(raw.view_maps) ? raw.view_maps : Array.isArray(raw.viewMaps) ? raw.viewMaps : null;
+}
+
+function takeViews(raw: Record<string, unknown>) {
+  const rows = viewRows(raw);
+  if (!rows) return;
+  const next = new Map<number, string>();
+  for (const item of rows) {
+    const row = rec(item);
+    if (!row) continue;
+    const userId = Number(row.user_id || row.userId || 0);
+    const slug = String(row.map_slug || row.mapSlug || "").trim();
+    if (userId > 0 && slug) next.set(userId, slug);
+  }
+  viewByUser = next;
+}
+
+function viewSlug(raw: Record<string, unknown>, userId: number) {
+  const rows = viewRows(raw);
+  if (!rows) return "";
+  for (const item of rows) {
+    const row = rec(item);
+    if (!row || Number(row.user_id || row.userId || 0) !== userId) continue;
+    return String(row.map_slug || row.mapSlug || "").trim();
+  }
+  return "";
+}
+
+function parsePhases(raw: unknown): Phase[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Phase[] = [];
+  for (const item of raw) {
+    const row = rec(item);
+    if (!row) continue;
+    const userId = Number(row.user_id ?? row.userId);
+    const kind = String(row.kind || "").trim();
+    if (!Number.isFinite(userId) || userId <= 0 || !kind) continue;
+    out.push({ userId, kind, mapId: String(row.map_id ?? row.mapId ?? "").trim() });
+  }
+  return out;
+}
+
+function activity(kind: string) {
+  if (kind === "match_found" || kind === "raid_starting" || kind === "raid_started") return "in_raid";
+  if (kind === "map_loading" || kind === "matching") return "matching";
+  if (kind === "raid_exited" || kind === "matching_aborted") return "lobby";
+  return "unknown";
+}
+
+function catalogSlug(slug: string, maps: MapPick[]) {
+  return findMap(slug, maps)?.slug || "";
+}
+
+function group(maps: MapPick[]): Board {
+  const phaseBy = new Map(phases.map((phase) => [phase.userId, phase]));
+  if (viewerId > 0 && localKind) {
+    phaseBy.set(viewerId, { userId: viewerId, kind: localKind, mapId: localMapId });
+  }
+  const buckets = new Map<string, Person[]>();
+  for (const map of maps) {
+    if (!buckets.has(map.slug)) buckets.set(map.slug, []);
+  }
+  const lobby: Member[] = [];
+  const matching: Member[] = [];
+  for (const member of members) {
+    const online = member.online || (socketLive && member.userId === viewerId);
+    if (!online) continue;
+    const phase = phaseBy.get(member.userId);
+    const state = activity(String(phase?.kind || "").trim());
+    if (state === "lobby" || state === "unknown") {
+      const watched = member.userId === viewerId
+        ? localWatch
+        : catalogSlug(viewByUser.get(member.userId) || "", maps);
+      const watchBucket = watched ? buckets.get(watched) : undefined;
+      if (watchBucket) {
+        watchBucket.push({ ...member, seat: "watch" });
+        continue;
+      }
+      lobby.push(member);
+      continue;
+    }
+    if (state !== "in_raid" && state !== "matching") continue;
+    const mapId = catalogSlug(phase?.mapId || "", maps);
+    const bucket = mapId ? buckets.get(mapId) : undefined;
+    if (state === "matching") {
+      if (bucket) bucket.push({ ...member, seat: "matching" });
+      else matching.push(member);
+      continue;
+    }
+    if (bucket) bucket.push({ ...member, seat: "raid" });
+  }
+  return {
+    lobby,
+    matching,
+    maps: [...buckets.entries()].map(([mapId, people]) => ({
+      mapId,
+      people: [
+        ...people.filter((person) => person.seat === "raid"),
+        ...people.filter((person) => person.seat === "watch"),
+        ...people.filter((person) => person.seat === "matching"),
+      ],
+    })),
+  };
+}
+
+export function resetMapBoard() {
+  generation += 1;
+  ready = false;
+  note = "正在读取房间";
+  members = [];
+  loadedRoomId = "";
+  canPick = true;
+  currentSlug = "";
+  shownMaps = [];
+}
+
+export function clearMapPresence() {
+  phases = [];
+  phaseRoomId = "";
+  lastOnline = null;
+  socketLive = false;
+}
+
+export function mapBoardReady() {
+  return ready;
+}
+
+export function setLocalWatch(slug: string) {
+  localWatch = slug.trim();
+}
+
+export function noteLocalPhase(input: { kind?: string; mapId?: string }) {
+  if (input.kind) {
+    localKind = input.kind.trim();
+    if (localKind === "raid_exited" || localKind === "matching_aborted") localMapId = "";
+  }
+  if (input.mapId) localMapId = input.mapId.trim();
+}
+
+export function applyRoomSync(payload: Record<string, unknown>) {
+  const event = String(payload.event || "");
+  if (event === "closed") {
+    socketLive = false;
+    return true;
+  }
+  const snap = rec(payload.snapshot);
+  if (snap) {
+    const id = String(snap.public_id || snap.publicId || "").trim();
+    if (loadedRoomId && id && id !== loadedRoomId) return false;
+    if (id) phaseRoomId = id;
+    takeViews(snap);
+    if (Array.isArray(payload.log_phases)) phases = parsePhases(payload.log_phases);
+    if (Array.isArray(payload.online_user_ids)) lastOnline = new Set(payload.online_user_ids.map((item) => Number(item)));
+    socketLive = true;
+    if (ready && (!loadedRoomId || !id || id === loadedRoomId)) {
+      const next = peopleOf(snap);
+      if (next.length) members = next;
+      const viewed = viewerId ? viewSlug(snap, viewerId) : "";
+      currentSlug = viewed || String(snap.map_slug || snap.mapSlug || "").trim();
+    }
+    return true;
+  }
+  if (event === "log_phase" || event === "view_map") {
+    if (Array.isArray(payload.log_phases)) phases = parsePhases(payload.log_phases);
+    if (Array.isArray(payload.view_maps) || event === "view_map") takeViews(payload);
+    socketLive = true;
+    return true;
+  }
+  if (event === "presence" && Array.isArray(payload.online_user_ids)) {
+    socketLive = true;
+    lastOnline = new Set(payload.online_user_ids.map((item) => Number(item)));
+    members = members.map((person) => ({ ...person, online: lastOnline?.has(person.userId) || false }));
+    return true;
+  }
+  return false;
+}
+
+export function refreshMapBoard() {
+  const node = document.querySelector(".map-pick");
+  if (!node || !ready) return;
+  node.outerHTML = mapBoardHtml(shownMaps);
+}
+
 function idsOf(value: unknown) {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
@@ -62,244 +286,53 @@ function idsOf(value: unknown) {
   return out;
 }
 
-function keySet(ids: string[]) {
-  return new Set(ids.map((id) => id.toLowerCase()));
-}
-
-function canon(slug: string, known: Set<string>) {
-  const key = slug.trim().toLowerCase();
-  if (!key) return "";
-  if (known.has(key)) return key;
-  for (const item of known) {
-    if (sameMap(item, key)) return item;
-  }
-  return key;
-}
-
-function peopleOf(raw: Record<string, unknown> | null, viewerId: number, viewerName: string): Member[] {
-  const occupants = Array.isArray(raw?.occupants) ? raw.occupants : [];
-  const membersRaw = Array.isArray(raw?.members) ? raw.members : [];
-  const source = occupants.length
-    ? occupants
-    : membersRaw.filter((item) => {
-      const row = rec(item);
-      return row ? row.in_room !== false && row.inRoom !== false : false;
-    });
-  const people = source.flatMap((item) => {
-    const row = rec(item);
-    if (!row) return [];
-    const userId = Number(row.user_id || row.userId || 0);
-    if (!userId) return [];
-    const name = String(row.display_name || row.displayName || row.name || "").trim() || `用户${userId}`;
-    return [{ userId, name }];
-  });
-  if (people.length) return people;
-  return [{ userId: viewerId, name: viewerName || "你" }];
-}
-
-function parseCells(raw: unknown): Cell[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((item) => {
-    const row = rec(item);
-    if (!row) return [];
-    const userId = Number(row.user_id || row.userId || 0);
-    if (!userId) return [];
-    return [{ userId, count: Math.max(0, Number(row.count || 0) || 0), uploaded: Boolean(row.uploaded) }];
-  });
-}
-
-function parseTasks(raw: unknown): TaskHit[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((item) => {
-    const row = rec(item);
-    if (!row) return [];
-    const id = String(row.id || "").trim();
-    if (!id) return [];
-    const userIds = (Array.isArray(row.user_ids) ? row.user_ids : Array.isArray(row.userIds) ? row.userIds : [])
-      .map((userId) => Number(userId))
-      .filter((userId) => userId > 0);
-    return [{
-      id,
-      name: String(row.name || id),
-      traderSlug: String(row.trader_slug || row.traderSlug || "").trim().toLowerCase(),
-      userIds,
-    }];
-  });
-}
-
-function parseOverlap(raw: unknown): Row[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((item) => {
-    const row = rec(item);
-    if (!row) return [];
-    const mapSlug = String(row.map_slug || row.mapSlug || "").trim();
-    if (!mapSlug) return [];
-    const cells = parseCells(row.cells);
-    const withTasks = Number(row.with_tasks_count ?? row.withTasksCount);
-    return [{
-      mapSlug,
-      withTasks: Number.isFinite(withTasks) ? withTasks : cells.filter((cell) => cell.uploaded && cell.count > 0).length,
-      cells,
-      tasks: parseTasks(row.tasks),
-    }];
-  });
-}
-
-function parseUploaded(raw: unknown) {
-  if (!Array.isArray(raw)) return null;
-  return raw.flatMap((item) => {
-    const row = rec(item);
-    if (!row) return [];
-    const userId = Number(row.user_id || row.userId || 0);
-    if (!userId) return [];
-    return [{ userId, uploaded: Boolean(row.uploaded) }];
-  });
-}
-
-function align(maps: MapPick[], squad: Member[], overlap: Row[], filled: boolean): Row[] {
-  const by = new Map(overlap.map((row) => [row.mapSlug, row]));
-  const order = new Map(maps.map((map, index) => [map.slug, index]));
-  const rows = maps.map((map) => {
-    const found = by.get(map.slug);
-    const cells = squad.map((member) => {
-      const cell = found?.cells.find((item) => item.userId === member.userId);
-      if (cell) return cell;
-      return { userId: member.userId, count: 0, uploaded: filled };
-    });
-    const withTasks = found
-      ? found.withTasks
-      : cells.filter((cell) => cell.uploaded && cell.count > 0).length;
-    return { mapSlug: map.slug, withTasks, cells, tasks: found?.tasks || [] };
-  });
-  const sum = (row: Row) => row.cells.reduce((total, cell) => total + (cell.uploaded ? cell.count : 0), 0);
-  return rows.sort((left, right) => right.withTasks - left.withTasks || sum(right) - sum(left) || (order.get(left.mapSlug) ?? 99) - (order.get(right.mapSlug) ?? 99));
-}
-
-async function localRows(maps: MapPick[], viewerId: number, progress: Record<string, unknown>) {
-  const catalog = await invoke<{ items?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/tasks?layout=all" });
-  const known = new Set(maps.map((map) => map.slug));
-  const done = keySet(idsOf(progress.task_ids || progress.taskIds));
-  const failed = keySet(idsOf(progress.failed_ids || progress.failedIds));
-  const started = idsOf(progress.started_ids || progress.startedIds).filter((id) => !done.has(id.toLowerCase()) && !failed.has(id.toLowerCase()));
-  const active = new Set(started.map((id) => id.toLowerCase()));
-  const grouped = new Map<string, TaskHit[]>();
-  for (const item of catalog.items || []) {
-    const id = String(item.id || "").trim();
-    if (!id || !active.has(id.toLowerCase())) continue;
-    const mapSlug = canon(String(item.map_slug || item.mapSlug || ""), known);
-    if (!known.has(mapSlug)) continue;
-    const list = grouped.get(mapSlug) || [];
-    list.push({
-      id,
-      name: String(item.name || id),
-      traderSlug: String(item.trader_slug || item.traderSlug || "").trim().toLowerCase(),
-      userIds: viewerId ? [viewerId] : [],
-    });
-    grouped.set(mapSlug, list);
-  }
-  return [...grouped.entries()].map(([mapSlug, tasks]) => ({
-    mapSlug,
-    withTasks: tasks.length ? 1 : 0,
-    cells: [{ userId: viewerId, count: tasks.length, uploaded: true }],
-    tasks,
-  }));
-}
-
-export function resetMapBoard() {
-  generation += 1;
-  ready = false;
-  note = "正在读取任务数量";
-  members = [];
-  rows = [];
-  unsynced = [];
-  catalogGap = false;
-  cachedRoom = null;
-  pickHost = true;
-  currentSlug = "";
-  overlapOrder = [];
-  previewSlug = "";
-  previewTouched = false;
-}
-
-export function mapBoardReady() {
-  return ready;
+function syncProgress(roomRaw: Record<string, unknown>, gen: number) {
+  const roomKey = encodeURIComponent(String(roomRaw.public_id || roomRaw.publicId || ""));
+  if (!roomKey || !isMember(roomRaw)) return;
+  void (async () => {
+    const progress = await invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" }).catch(() => null);
+    if (!progress || gen !== generation) return;
+    const done = idsOf(progress.task_ids || progress.taskIds);
+    const drop = new Set([...done, ...idsOf(progress.failed_ids || progress.failedIds)].map((id) => id.toLowerCase()));
+    const started = idsOf(progress.started_ids || progress.startedIds).filter((id) => !drop.has(id.toLowerCase()));
+    await invoke("site_put", {
+      path: `/guides/tarkov/raid-rooms/${roomKey}/task-progress`,
+      body: { started_ids: started, done_ids: done },
+    }).catch(() => undefined);
+  })();
 }
 
 export async function loadMapBoard(input: { roomId: string; viewerId: number; viewerName: string }, maps: MapPick[]) {
-  if (ready) return cachedRoom;
+  if (ready) return null;
   if (inflight) return inflight;
   const gen = generation;
+  viewerId = input.viewerId;
+  shownMaps = maps;
   const current = (async () => {
-    const viewerName = input.viewerName.trim() || "你";
-    let progress: Record<string, unknown> | null = null;
-    let progressError = "";
-    try {
-      progress = await invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" });
-    } catch (error) {
-      progressError = error instanceof Error ? error.message : "任务进度读取失败";
-    }
     let roomRaw: Record<string, unknown> | null = null;
-    if (input.roomId) {
-      roomRaw = unwrapRoom(await invoke("site_get", { path: `/guides/tarkov/raid-rooms/${input.roomId}` }).catch(() => null));
-    } else {
-      roomRaw = unwrapRoom(await invoke("site_get", { path: "/guides/tarkov/raid-rooms/mine" }).catch(() => null));
-    }
-    let synced = roomRaw;
-    if (roomRaw && progress) {
-      const done = idsOf(progress.task_ids || progress.taskIds);
-      const drop = keySet([...done, ...idsOf(progress.failed_ids || progress.failedIds)]);
-      const started = idsOf(progress.started_ids || progress.startedIds).filter((id) => !drop.has(id.toLowerCase()));
-      const roomKey = encodeURIComponent(String(roomRaw.public_id || roomRaw.publicId));
-      synced = unwrapRoom(await invoke("site_put", {
-        path: `/guides/tarkov/raid-rooms/${roomKey}/task-progress`,
-        body: { started_ids: started, done_ids: done },
-      }).catch(() => null)) || roomRaw;
+    try {
+      roomRaw = input.roomId
+        ? unwrapRoom(await invoke("site_get", { path: `/guides/tarkov/raid-rooms/${input.roomId}` }))
+        : unwrapRoom(await invoke("site_get", { path: "/guides/tarkov/raid-rooms/mine" }));
+    } catch {
+      roomRaw = null;
     }
     if (gen !== generation) return null;
-    pickHost = synced ? Boolean(synced.is_host || synced.isHost) : true;
-    currentSlug = String(synced?.map_slug || synced?.mapSlug || "").trim();
-    const squad = peopleOf(synced, input.viewerId, viewerName);
-    const overlapRaw = synced?.map_overlap ?? synced?.mapOverlap;
-    const hasOverlap = Array.isArray(overlapRaw);
-    let overlap = hasOverlap ? parseOverlap(overlapRaw) : [];
-    let filled = false;
-    catalogGap = hasOverlap && overlap.length === 0;
-    if (!hasOverlap) {
-      if (!progress) {
-        note = progressError || "任务进度读取失败";
-        members = squad;
-        rows = align(maps, squad, [], false);
-        unsynced = [];
-        cachedRoom = synced;
-        ready = true;
-        return synced;
-      }
-      try {
-        overlap = await localRows(maps, input.viewerId, progress);
-        filled = true;
-        catalogGap = false;
-      } catch (error) {
-        note = error instanceof Error ? error.message : "任务目录读取失败";
-        members = squad;
-        rows = align(maps, squad, [], false);
-        unsynced = [];
-        catalogGap = true;
-        cachedRoom = synced;
-        ready = true;
-        return synced;
-      }
+    const id = String(roomRaw?.public_id || roomRaw?.publicId || "").trim();
+    if (id && phaseRoomId && phaseRoomId !== id) {
+      phases = [];
+      lastOnline = null;
     }
-    const uploaded = parseUploaded(synced?.task_progress ?? synced?.taskProgress);
-    overlapOrder = overlap.map((row) => row.mapSlug);
-    members = squad;
-    rows = align(maps, squad, overlap, filled);
-    unsynced = uploaded
-      ? squad.filter((member) => !uploaded.find((item) => item.userId === member.userId)?.uploaded).map((member) => member.name)
-      : [];
+    loadedRoomId = id;
+    if (id) phaseRoomId = id;
+    if (roomRaw) takeViews(roomRaw);
+    members = peopleOf(roomRaw);
+    canPick = roomRaw ? isMember(roomRaw) : true;
+    currentSlug = roomRaw ? (viewerId ? viewSlug(roomRaw, viewerId) : "") || String(roomRaw.map_slug || roomRaw.mapSlug || "").trim() : "";
     note = "";
-    cachedRoom = synced;
     ready = true;
-    return synced;
+    if (roomRaw) syncProgress(roomRaw, gen);
+    return roomRaw;
   })();
   inflight = current.finally(() => {
     if (inflight === current) inflight = null;
@@ -307,58 +340,31 @@ export async function loadMapBoard(input: { roomId: string; viewerId: number; vi
   return inflight;
 }
 
-function memberTasks(row: Row, userId: number) {
-  return row.tasks.filter((task) => task.userIds.includes(userId));
+function chip(person: Member, tag = "") {
+  const name = person.name || "成员";
+  const title = tag ? `${name} ${tag}` : name;
+  return `<span class="map-pick-chip" title="${esc(title)}"><i class="dot" style="background:${esc(colorForUserId(person.userId))}"></i>${person.host ? `<span aria-hidden="true">⭐</span>` : ""}<span class="map-pick-chip-name">${esc(name)}</span>${tag ? `<span class="map-pick-chip-tag">${esc(tag)}</span>` : ""}</span>`;
 }
 
-function tipHtml(row: Row, userId: number, uploaded: boolean) {
-  if (!uploaded) return `<span class="map-pick-tip app-hover">未同步</span>`;
-  const tasks = memberTasks(row, userId);
-  if (!tasks.length) return `<span class="map-pick-tip app-hover">没有进行中的本图任务</span>`;
-  const items = tasks.map((task) => {
-    const icon = task.traderSlug ? `<img src="https://tarkov.dev/images/traders/${encodeURIComponent(task.traderSlug)}-icon.jpg" alt="" />` : `<i></i>`;
-    return `<li>${icon}<span>${esc(task.name)}</span></li>`;
-  }).join("");
-  return `<span class="map-pick-tip app-hover"><ul>${items}</ul></span>`;
+function seatTag(seat: Seat) {
+  if (seat === "matching") return "匹配中";
+  if (seat === "watch") return "观战中";
+  return "";
 }
 
-function resolvePreview(maps: MapPick[]) {
-  const known = new Set(maps.map((map) => map.slug));
-  const pick = (slug: string) => {
-    if (!slug || !known.size) return "";
-    const next = canon(slug, known);
-    return known.has(next) ? next : "";
-  };
-  if (previewTouched) {
-    const touched = pick(previewSlug);
-    if (touched) return touched;
-  }
-  const goon = pick(goonSlug());
-  if (goon) return goon;
-  for (const slug of overlapOrder) {
-    const next = pick(slug);
-    if (next) return next;
-  }
-  const current = pick(currentSlug);
-  if (current) return current;
-  return maps[0]?.slug || "";
-}
-
-export function setMapPreview(slug: string) {
-  previewTouched = true;
-  previewSlug = slug;
+function band(label: string, people: Member[]) {
+  if (!people.length) return "";
+  return `<div class="map-pick-band"><span class="map-pick-band-label">${label}</span><div class="map-pick-chips">${people.map((person) => chip(person)).join("")}</div></div>`;
 }
 
 export function paintMapPickGoon() {
   const slug = goonSlug();
   const hint = goonHint();
-  if (!previewTouched && slug) previewSlug = slug;
-  document.querySelectorAll<HTMLElement>(".map-pick-row").forEach((row) => {
-    const mapSlug = row.dataset.mapSlug || "";
+  document.querySelectorAll<HTMLElement>(".map-pick-card").forEach((card) => {
+    const mapSlug = card.dataset.mapSlug || "";
     const on = Boolean(slug && hint && sameMap(mapSlug, slug));
-    row.classList.toggle("is-goon", on);
-    row.classList.toggle("is-preview", sameMap(mapSlug, previewSlug));
-    let node = row.querySelector<HTMLElement>(".map-goon");
+    card.classList.toggle("is-goon", on);
+    let node = card.querySelector<HTMLElement>(".map-goon");
     if (!on) {
       node?.remove();
       return;
@@ -366,47 +372,37 @@ export function paintMapPickGoon() {
     if (!node) {
       node = document.createElement("span");
       node.className = "map-goon";
-      row.querySelector(".map-text")?.append(node);
+      card.querySelector(".map-pick-card-body")?.append(node);
     }
-    node.textContent = hint;
+    node.textContent = "三狗出没";
     node.title = hint;
   });
 }
 
 export function mapBoardHtml(maps: MapPick[]) {
+  shownMaps = maps;
   if (!ready) {
     return `<section class="map-pick">${isPending(note) ? spin(note) : `<p class="map-pick-sync">${esc(note)}</p>`}</section>`;
   }
-  const preview = resolvePreview(maps);
-  previewSlug = preview;
+  const board = group(maps);
   const goon = goonSlug();
   const hint = goonHint();
-  const head = members.map((member) => `<th class="user"><span class="user-head"><i class="dot" style="background:${esc(colorForUserId(member.userId))}"></i>${esc(member.name)}</span></th>`).join("");
-  const body = rows.map((row) => {
-    const map = maps.find((item) => item.slug === row.mapSlug);
-    const name = mapTitle(row.mapSlug, map?.name || "");
-    const image = map?.thumbLink ? `<img class="thumb" src="${esc(map.thumbLink)}" alt="" />` : `<i class="thumb"></i>`;
-    const onGoon = Boolean(hint) && sameMap(goon, row.mapSlug);
-    const classes = [
-      "map-pick-row",
-      sameMap(row.mapSlug, preview) ? "is-preview" : "",
-      sameMap(row.mapSlug, currentSlug) ? "is-current" : "",
-      onGoon ? "is-goon" : "",
-    ].filter(Boolean).join(" ");
-    const cells = members.map((member) => {
-      const cell = row.cells.find((item) => item.userId === member.userId);
-      const uploaded = Boolean(cell?.uploaded);
-      const hit = uploaded && (cell?.count || 0) > 0;
-      const text = uploaded ? String(cell?.count || 0) : "—";
-      return `<td class="user"><span class="count-wrap"><span class="count${hit ? " hit" : uploaded ? "" : " muted"}">${esc(text)}</span>${tipHtml(row, member.userId, uploaded)}</span></td>`;
-    }).join("");
-    const action = pickHost
-      ? `<td><button type="button" class="map-pick-btn" data-map="${esc(row.mapSlug)}">${sameMap(row.mapSlug, currentSlug) ? "继续这张图" : "选这张图"}</button></td>`
+  const cards = board.maps.map((row) => {
+    const map = maps.find((item) => item.slug === row.mapId);
+    const name = mapTitle(row.mapId, map?.name || "");
+    const current = Boolean(currentSlug) && sameMap(row.mapId, currentSlug);
+    const onGoon = Boolean(hint) && sameMap(goon, row.mapId);
+    const image = map?.thumbLink
+      ? `<img class="map-pick-thumb" src="${esc(map.thumbLink)}" alt="" />`
+      : `<span class="map-pick-thumb is-empty"></span>`;
+    const classes = ["map-pick-card", current ? "is-current" : "", onGoon ? "is-goon" : ""].filter(Boolean).join(" ");
+    const label = current ? `继续看${name}` : `切换到${name}`;
+    const pick = canPick ? ` data-map="${esc(row.mapId)}"` : " disabled";
+    const pressed = current ? ` aria-pressed="true"` : ` aria-pressed="false"`;
+    const people = row.people.length
+      ? `<div class="map-pick-chips">${row.people.map((person) => chip(person, seatTag(person.seat))).join("")}</div>`
       : "";
-    return `<tr class="${classes}" data-map-slug="${esc(row.mapSlug)}" data-map-name="${esc(name)}" data-map-preview="${esc(row.mapSlug)}"><th><div class="map-cell">${image}<span class="map-text"><span class="map-name">${esc(name)}</span>${onGoon ? `<span class="map-goon" title="${esc(hint)}">${esc(hint)}</span>` : ""}</span></div></th>${cells}<td class="people">${row.withTasks}人</td>${action}</tr>`;
+    return `<div class="map-pick-cell"><button type="button" class="${classes}" data-map-slug="${esc(row.mapId)}"${pick}${pressed} aria-label="${esc(label)}">${image}<span class="map-pick-card-body"><span class="map-pick-name">${esc(name)}</span>${onGoon ? `<span class="map-goon" title="${esc(hint)}">三狗出没</span>` : ""}</span></button>${people}</div>`;
   }).join("");
-  const gap = catalogGap ? `<p class="map-pick-sync">任务目录尚未同步，数字暂不可用。</p>` : "";
-  const missing = unsynced.length ? `<p class="map-pick-sync">未同步：${esc(unsynced.join("、"))}</p>` : "";
-  const pickHead = pickHost ? `<th></th>` : "";
-  return `<section class="map-pick">${gap}${missing}<div class="map-pick-wrap"><table class="map-pick-table"><thead><tr><th>地图</th>${head}<th class="people">有任务人数</th>${pickHead}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+  return `<section class="map-pick"><p class="map-pick-hint">点一张图，只切换你自己看的地图。方块下面是正在这张图里的人，匹配中、观战中会另外标出。</p>${band("大厅中：", board.lobby)}${band("匹配中：", board.matching)}<p class="map-pick-section">战局中：</p><div class="map-pick-grid">${cards}</div></section>`;
 }

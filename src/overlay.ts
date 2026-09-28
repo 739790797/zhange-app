@@ -2,7 +2,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { adoptAccount, type AccountMapFilters } from "./mapFilterAccount";
-import { destroyLiveMap, fitLiveMap, liveMapCamera, mountLiveMap, replacePrefs, setLiveMapCamera, snapshotAccount, snapshotPrefs, watchLiveMapCamera, type FilterPrefs } from "./liveMap";
+import { destroyLiveMap, fitLiveMap, invalidateLiveMap, liveMapCamera, mountLiveMap, replacePrefs, setLiveMapCamera, snapshotAccount, snapshotPrefs, watchLiveMapCamera, type FilterPrefs } from "./liveMap";
 import { fadeIn, fadeOut } from "./motion";
 
 export type OverlayState = {
@@ -13,7 +13,6 @@ export type OverlayState = {
   alwaysOnTop: boolean;
   clickThrough: boolean;
   fullscreen: boolean;
-  raidHud: boolean;
   hotkeyEnabled: boolean;
   hotkey: string;
   visible: boolean;
@@ -25,14 +24,6 @@ export type OverlayState = {
   placed: boolean;
   mapSlug: string;
   autoFollow: boolean;
-  raidChime: boolean;
-};
-
-export type RaidStatus = {
-  inRaid: boolean;
-  elapsedSecs: number;
-  serverCountry: string;
-  location: string;
 };
 
 type SyncPayload = { slug: string; prefs: FilterPrefs; account?: AccountMapFilters };
@@ -48,9 +39,9 @@ async function invoke<T>(command: string, args: Record<string, unknown> = {}): P
   return internals.invoke(command, args);
 }
 
-export function overlayView(): "overlay" | "raid" | "" {
+export function overlayView(): "overlay" | "" {
   const view = new URLSearchParams(location.search).get("view");
-  return view === "overlay" || view === "raid" ? view : "";
+  return view === "overlay" ? view : "";
 }
 
 export function overlayCardHtml() {
@@ -73,11 +64,9 @@ export function overlayDialogHtml(pop = false) {
         <button type="button" class="overlay-action" data-overlay="shape">形状切换</button>
         <label class="overlay-check"><input type="checkbox" data-overlay="alwaysOnTop" />置顶锁定</label>
         <label class="overlay-check"><input type="checkbox" data-overlay="fullscreen" />全屏</label>
-        <label class="overlay-check"><input type="checkbox" data-overlay="raidHud" />战局悬浮窗</label>
         <label class="overlay-check"><input type="checkbox" data-overlay="autoFollow" />进图自动切图</label>
-        <label class="overlay-check"><input type="checkbox" data-overlay="raidChime" />战局提示音</label>
         <button type="button" class="overlay-action" data-overlay="reset">重置位置与尺寸</button>
-        <label class="overlay-hotkey"><input type="checkbox" data-overlay="hotkeyEnabled" /><span>快捷键</span><button type="button" id="overlay-hotkey">M</button></label>
+        <label class="overlay-hotkey"><input type="checkbox" data-overlay="hotkeyEnabled" /><span>战局快捷键</span><button type="button" id="overlay-hotkey">M</button></label>
       </div>
     </div>`;
 }
@@ -85,10 +74,6 @@ export function overlayDialogHtml(pop = false) {
 export async function ensureOverlayState() {
   if (!overlayState) overlayState = await invoke<OverlayState>("overlay_get").catch(() => null);
   return overlayState;
-}
-
-export function setOverlayHotkeyLive(live: boolean) {
-  void invoke("overlay_set_hotkey_live", { live }).catch(() => undefined);
 }
 
 export async function publishOverlayMap(slug: string) {
@@ -107,22 +92,6 @@ export function bootOverlayShell() {
       root.innerHTML = `<div class="overlay-stage" id="overlay-stage"><div id="map-root"></div><div class="overlay-grips" id="overlay-grips"><i></i><i></i><i></i><i></i></div><p class="overlay-empty" id="overlay-empty" hidden>先在主窗口打开一张地图</p></div>${overlayDialogHtml(true)}`;
     }
     void bootMapOverlay();
-    return true;
-  }
-  if (kind === "raid") {
-    document.documentElement.classList.add("overlay-window");
-    document.body.classList.add("overlay-window");
-    const root = document.querySelector("#root");
-    if (root) {
-      root.innerHTML = `
-        <div class="raid-hud" id="raid-hud">
-          <p><span>塔科夫</span><strong id="raid-left">--:--:--</strong></p>
-          <p><span>第二钟</span><strong id="raid-right">--:--:--</strong></p>
-          <p><span>战局</span><strong id="raid-elapsed">未开始</strong></p>
-          <p><span>服务器</span><strong id="raid-server">—</strong></p>
-        </div>`;
-    }
-    void bootRaidHud();
     return true;
   }
   return false;
@@ -205,9 +174,7 @@ export function onOverlayChange(target: EventTarget | null) {
   else if (key === "lockAspect") overlayState.lockAspect = target.checked;
   else if (key === "alwaysOnTop") overlayState.alwaysOnTop = target.checked;
   else if (key === "fullscreen") overlayState.fullscreen = target.checked;
-  else if (key === "raidHud") overlayState.raidHud = target.checked;
   else if (key === "autoFollow") overlayState.autoFollow = target.checked;
-  else if (key === "raidChime") overlayState.raidChime = target.checked;
   else if (key === "hotkeyEnabled") overlayState.hotkeyEnabled = target.checked;
   else return false;
   void persistOverlay(overlayState);
@@ -253,18 +220,14 @@ function paintOverlayDialog(state: OverlayState) {
   const lock = box("lockAspect");
   const top = box("alwaysOnTop");
   const fullscreen = box("fullscreen");
-  const raid = box("raidHud");
   const follow = box("autoFollow");
-  const chime = box("raidChime");
   const hotkey = box("hotkeyEnabled");
   const opacity = box("opacity");
   if (auto) auto.checked = state.autoFocus;
   if (lock) lock.checked = state.lockAspect;
   if (top) top.checked = state.alwaysOnTop;
   if (fullscreen) fullscreen.checked = state.fullscreen;
-  if (raid) raid.checked = state.raidHud;
   if (follow) follow.checked = state.autoFollow !== false;
-  if (chime) chime.checked = state.raidChime !== false;
   if (hotkey) hotkey.checked = state.hotkeyEnabled;
   if (opacity) opacity.value = String(state.opacity);
   const label = menu.querySelector("[data-opacity-label]");
@@ -318,12 +281,35 @@ async function bootMapOverlay() {
     closeOverlaySettings();
   });
   let rightDrag: { x: number; y: number; winX: number; winY: number; scale: number; moved: boolean; ready: boolean } | null = null;
+  let dragPoint: { x: number; y: number } | null = null;
+  let dragFrame = 0;
+  let dragSending = false;
+  let dragAgain = false;
+  const flushOverlayDrag = () => {
+    dragFrame = 0;
+    const point = dragPoint;
+    if (!point) return;
+    if (dragSending) {
+      dragAgain = true;
+      return;
+    }
+    dragSending = true;
+    void getCurrentWindow().setPosition(new PhysicalPosition(point.x, point.y)).finally(() => {
+      dragSending = false;
+      if (!dragAgain) return;
+      dragAgain = false;
+      if (!dragPoint || (dragPoint.x === point.x && dragPoint.y === point.y)) return;
+      dragFrame = window.requestAnimationFrame(flushOverlayDrag);
+    });
+  };
   document.addEventListener("pointerdown", (event) => {
     if (!(event instanceof PointerEvent) || event.button !== 2) return;
     if (event.target instanceof Element && event.target.closest("#overlay-menu")) return;
     const target = event.target;
     const originX = event.screenX;
     const originY = event.screenY;
+    dragPoint = null;
+    dragAgain = false;
     rightDrag = { x: originX, y: originY, winX: 0, winY: 0, scale: window.devicePixelRatio || 1, moved: false, ready: false };
     if (target instanceof Element) target.setPointerCapture?.(event.pointerId);
     void getCurrentWindow().outerPosition().then(async (pos) => {
@@ -340,12 +326,23 @@ async function bootMapOverlay() {
     const dy = event.screenY - rightDrag.y;
     if (Math.hypot(dx, dy) > 4) rightDrag.moved = true;
     if (!rightDrag.ready || !rightDrag.moved) return;
-    void getCurrentWindow().setPosition(new PhysicalPosition(Math.round(rightDrag.winX + dx * rightDrag.scale), Math.round(rightDrag.winY + dy * rightDrag.scale)));
+    dragPoint = {
+      x: Math.round(rightDrag.winX + dx * rightDrag.scale),
+      y: Math.round(rightDrag.winY + dy * rightDrag.scale),
+    };
+    if (!dragFrame) dragFrame = window.requestAnimationFrame(flushOverlayDrag);
   }, true);
   document.addEventListener("pointerup", (event) => {
-    if (!(event instanceof PointerEvent) || event.button !== 2 || !rightDrag?.moved) return;
+    const dragging = Boolean(rightDrag?.moved);
+    if (dragFrame) {
+      window.cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+    }
+    if (dragging) flushOverlayDrag();
+    if (!(event instanceof PointerEvent) || event.button !== 2 || !dragging) return;
     window.setTimeout(() => {
       rightDrag = null;
+      dragPoint = null;
     }, 0);
   }, true);
   document.addEventListener("contextmenu", (event) => {
@@ -364,6 +361,10 @@ async function bootMapOverlay() {
     stage.style.opacity = String(Math.max(0.1, state.opacity / 100));
     stage.classList.toggle("is-circle", state.shape === "circle");
   };
+  const refit = () => {
+    invalidateLiveMap();
+  };
+  window.addEventListener("resize", refit);
   overlayState = await invoke<OverlayState>("overlay_get").catch(() => null);
   if (overlayState) applyChrome(overlayState);
   void listen<OverlayState>("overlay-changed", (event) => {
@@ -396,76 +397,12 @@ async function showMap(slug: string, prefs: FilterPrefs | null) {
     const saved = savedViews()[slug];
     if (saved) setLiveMapCamera(saved.lat, saved.lng, saved.zoom);
     else fitLiveMap();
+    requestAnimationFrame(() => {
+      invalidateLiveMap();
+      if (!savedViews()[slug]) fitLiveMap();
+    });
     watchLiveMapCamera(() => rememberView(slug));
     return;
   }
   if (prefs) replacePrefs(prefs);
-}
-
-function pad(value: number) {
-  return String(value).padStart(2, "0");
-}
-
-function clockText(total: number) {
-  const day = ((total % 86400) + 86400) % 86400;
-  const hour = Math.floor(day / 3600);
-  const minute = Math.floor((day % 3600) / 60);
-  const second = Math.floor(day % 60);
-  return `${pad(hour)}:${pad(minute)}:${pad(second)}`;
-}
-
-function tarkovClocks() {
-  const now = new Date();
-  const seconds = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds() + 10800;
-  const accelerated = ((seconds % 86400) + 86400) % 86400 * 7;
-  return { left: clockText(accelerated), right: clockText(accelerated + 12 * 3600) };
-}
-
-function paintRaid(status: RaidStatus | null) {
-  const clocks = tarkovClocks();
-  const left = document.querySelector("#raid-left");
-  const right = document.querySelector("#raid-right");
-  const elapsed = document.querySelector("#raid-elapsed");
-  const server = document.querySelector("#raid-server");
-  if (left) left.textContent = clocks.left;
-  if (right) right.textContent = clocks.right;
-  if (elapsed) {
-    if (!status?.inRaid) elapsed.textContent = "未开始";
-    else {
-      const hours = Math.floor(status.elapsedSecs / 3600);
-      const minutes = Math.floor((status.elapsedSecs % 3600) / 60);
-      const seconds = status.elapsedSecs % 60;
-      elapsed.textContent = hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
-    }
-  }
-  if (server) server.textContent = status?.inRaid ? status.serverCountry || "未知" : "—";
-}
-
-async function bootRaidHud() {
-  const frame = document.querySelector<HTMLElement>("#raid-hud");
-  frame?.addEventListener("pointerdown", () => {
-    void getCurrentWindow().startDragging();
-  });
-  const pull = async () => {
-    const status = await invoke<RaidStatus>("raid_status").catch(() => null);
-    lastRaid = status;
-    raidStamp = Date.now();
-    paintRaid(shownRaid());
-  };
-  paintRaid(null);
-  window.setInterval(() => paintRaid(shownRaid()), 1000);
-  window.setInterval(() => {
-    void pull();
-  }, 3000);
-  await pull();
-}
-
-let lastRaid: RaidStatus | null = null;
-let raidStamp = 0;
-
-function shownRaid(): RaidStatus | null {
-  if (!lastRaid) return null;
-  if (!lastRaid.inRaid) return lastRaid;
-  const extra = Math.max(0, Math.floor((Date.now() - raidStamp) / 1000));
-  return { ...lastRaid, elapsedSecs: lastRaid.elapsedSecs + extra };
 }

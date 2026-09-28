@@ -360,6 +360,22 @@ fn pressed(vk: i32) -> bool {
 fn hotkeys() {
     let mut held = std::collections::HashSet::new();
     loop {
+        if crate::overlay::hotkey_suppressed() {
+            let state = get();
+            if state.visual_enabled {
+                for scheme in &state.schemes {
+                    let Some(vk) = vk_of(&scheme.visual.hotkey) else { continue };
+                    if pressed(vk) { held.insert(vk); } else { held.remove(&vk); }
+                }
+            }
+            if state.fitness.enabled {
+                if let Some(vk) = vk_of(&state.fitness.hotkey) {
+                    if pressed(vk) { held.insert(vk); } else { held.remove(&vk); }
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(30));
+            continue;
+        }
         let state = get();
         if state.visual_enabled {
             for (index, scheme) in state.schemes.iter().enumerate() {

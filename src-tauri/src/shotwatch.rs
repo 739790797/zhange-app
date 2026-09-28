@@ -62,6 +62,10 @@ pub struct ShotSettings {
     pub auto_enabled: bool,
     #[serde(default = "default_auto_secs")]
     pub auto_secs: u32,
+    #[serde(default)]
+    pub hotkey_from_game: bool,
+    #[serde(default)]
+    pub game_hotkey: String,
 }
 
 fn default_on() -> bool {
@@ -89,6 +93,8 @@ impl Default for ShotSettings {
             hotkey: default_hotkey(),
             auto_enabled: false,
             auto_secs: 5,
+            hotkey_from_game: false,
+            game_hotkey: String::new(),
         }
     }
 }
@@ -100,6 +106,8 @@ static SETTINGS: Mutex<ShotSettings> = Mutex::new(ShotSettings {
     hotkey: String::new(),
     auto_enabled: false,
     auto_secs: 5,
+    hotkey_from_game: false,
+    game_hotkey: String::new(),
 });
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 
@@ -110,20 +118,23 @@ pub fn state() -> ShotState {
 pub fn settings(app: &AppHandle) -> ShotSettings {
     let loaded = read_settings(app);
     *SETTINGS.lock().expect("shot-settings") = loaded.clone();
-    loaded
+    present(loaded)
 }
 
 pub fn set_capturing(on: bool) {
     CAPTURING.store(on, Ordering::Relaxed);
 }
 
-pub fn save_settings(app: &AppHandle, next: ShotSettings) -> Result<ShotSettings, String> {
+pub fn save_settings(app: &AppHandle, mut next: ShotSettings) -> Result<ShotSettings, String> {
+    if next.hotkey_from_game {
+        next.hotkey = read_settings(app).hotkey;
+    }
     let saved = normalize_settings(next);
     let path = settings_file(app)?;
     let text = serde_json::to_string_pretty(&saved).map_err(|err| err.to_string())?;
     fs::write(path, text).map_err(|err| err.to_string())?;
     *SETTINGS.lock().expect("shot-settings") = saved.clone();
-    Ok(saved)
+    Ok(present(saved))
 }
 
 pub fn spawn(app: AppHandle) {
@@ -139,14 +150,33 @@ fn watch(app: AppHandle) {
     let mut last_scan = Instant::now() - Duration::from_secs(2);
     let mut last_tap: Option<Instant> = None;
     let mut boost: Option<Instant> = None;
+    let mut game_bind: Option<ShotBind> = None;
+    let mut game_mtime: Option<SystemTime> = None;
+    let mut game_checked = Instant::now() - Duration::from_secs(2);
+    let mut bind_sig = String::new();
     loop {
         let settings = SETTINGS.lock().expect("shot-settings").clone();
+        if game_checked.elapsed() >= Duration::from_secs(1) {
+            game_checked = Instant::now();
+            let path = control_path();
+            let mtime = path.as_ref().and_then(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
+            if path.is_none() || mtime != game_mtime {
+                game_mtime = mtime;
+                game_bind = path.and_then(|path| fs::read_to_string(path).ok()).and_then(|text| screenshot_bind(&text));
+            }
+        }
+        let bind = game_bind.clone().unwrap_or_else(|| fallback_bind(&settings.hotkey));
+        let sig = format!("{}|{}", bind.hotkey, bind.game_name);
+        if sig != bind_sig {
+            held = false;
+            bind_sig = sig;
+        }
         if settings.sync_enabled {
             if !sync_was {
                 last_scan = Instant::now() - Duration::from_secs(2);
             }
             sync_was = true;
-            let poke = hotkey_edge(&mut held);
+            let poke = hotkey_edge(&mut held, &bind);
             let boost_due = boost.is_some_and(|at| at.elapsed() >= Duration::from_millis(400));
             if poke {
                 let _ = app.emit("shot-poke", ());
@@ -175,10 +205,14 @@ fn watch(app: AppHandle) {
                 let interval = Duration::from_secs(settings.auto_secs as u64);
                 let due = last_tap.is_none_or(|at| at.elapsed() >= interval);
                 if due && !CAPTURING.load(Ordering::Relaxed) && game_foreground() {
-                    if hotkey_reserved(&settings.hotkey) {
+                    if bind.triggers.is_empty() {
                         last_tap = Some(Instant::now());
-                    } else if let Some(vk) = vk_of(&settings.hotkey) {
-                        tap_key(vk);
+                    } else {
+                        crate::overlay::suppress_hotkey(true);
+                        thread::sleep(Duration::from_millis(45));
+                        tap_bind(&bind);
+                        thread::sleep(Duration::from_millis(45));
+                        crate::overlay::suppress_hotkey(false);
                         last_tap = Some(Instant::now());
                         boost = Some(Instant::now());
                     }
@@ -406,7 +440,181 @@ fn normalize_settings(next: ShotSettings) -> ShotSettings {
         hotkey: normalize_hotkey(&next.hotkey),
         auto_enabled: next.auto_enabled,
         auto_secs: clamp_auto(next.auto_secs),
+        hotkey_from_game: false,
+        game_hotkey: String::new(),
     }
+}
+
+fn present(mut settings: ShotSettings) -> ShotSettings {
+    if let Some(bind) = read_game_bind() {
+        settings.hotkey = bind.hotkey;
+        settings.game_hotkey = bind.game_name;
+        settings.hotkey_from_game = true;
+    }
+    settings
+}
+
+#[derive(Clone)]
+struct ShotBind {
+    modifiers: Vec<i32>,
+    triggers: Vec<i32>,
+    hotkey: String,
+    game_name: String,
+}
+
+struct UnityKey {
+    vk: i32,
+    modifier: bool,
+    hotkey: String,
+    game_name: String,
+}
+
+fn control_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    let path = PathBuf::from(appdata)
+        .join("Battlestate Games")
+        .join("Escape from Tarkov")
+        .join("Settings")
+        .join("Control.ini");
+    path.is_file().then_some(path)
+}
+
+fn read_game_bind() -> Option<ShotBind> {
+    let text = fs::read_to_string(control_path()?).ok()?;
+    screenshot_bind(&text)
+}
+
+fn screenshot_bind(text: &str) -> Option<ShotBind> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let bindings = value.get("keyBindings")?.as_array()?;
+    let entry = bindings.iter().find(|item| item.get("keyName").and_then(|name| name.as_str()) == Some("MakeScreenshot"))?;
+    let variants = entry.get("variants")?.as_array()?;
+    for variant in variants {
+        let codes = variant.get("keyCode")?.as_array()?;
+        let names: Vec<&str> = codes.iter().filter_map(|code| code.as_str()).filter(|code| !code.is_empty()).collect();
+        if names.is_empty() {
+            continue;
+        }
+        if let Some(bind) = bind_from_codes(&names) {
+            return Some(bind);
+        }
+    }
+    None
+}
+
+fn bind_from_codes(names: &[&str]) -> Option<ShotBind> {
+    let mut pieces = Vec::new();
+    for name in names {
+        pieces.push(unity_key(name)?);
+    }
+    let mut modifiers = Vec::new();
+    let mut triggers = Vec::new();
+    let mut hotkey = String::new();
+    for piece in &pieces {
+        if piece.modifier {
+            modifiers.push(piece.vk);
+        } else {
+            if hotkey.is_empty() {
+                hotkey = piece.hotkey.clone();
+            }
+            triggers.push(piece.vk);
+        }
+    }
+    if triggers.is_empty() {
+        return None;
+    }
+    let game_name = pieces.iter().map(|piece| piece.game_name.as_str()).collect::<Vec<_>>().join(" + ");
+    Some(ShotBind { modifiers, triggers, hotkey, game_name })
+}
+
+fn fallback_bind(hotkey: &str) -> ShotBind {
+    let hotkey = normalize_hotkey(hotkey);
+    ShotBind {
+        modifiers: Vec::new(),
+        triggers: vk_of(&hotkey).into_iter().collect(),
+        game_name: hotkey.clone(),
+        hotkey,
+    }
+}
+
+fn tap_bind(bind: &ShotBind) {
+    for vk in &bind.modifiers {
+        key_event(*vk, false);
+    }
+    for vk in &bind.triggers {
+        tap_key(*vk);
+    }
+    for vk in bind.modifiers.iter().rev() {
+        key_event(*vk, true);
+    }
+}
+
+fn key_event(vk: i32, up: bool) {
+    let flags = if up { 0x0002 } else { 0 };
+    unsafe { keybd_event(vk as u8, 0, flags, 0) };
+}
+
+fn unity_key(raw: &str) -> Option<UnityKey> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if let Some(rest) = name.strip_prefix("Alpha") {
+        if let Ok(digit) = rest.parse::<u8>() {
+            if digit <= 9 {
+                let ch = char::from(b'0' + digit).to_string();
+                return Some(UnityKey { vk: ch.as_bytes()[0] as i32, modifier: false, hotkey: ch.clone(), game_name: ch });
+            }
+        }
+    }
+    if let Some(rest) = name.strip_prefix('F') {
+        if let Ok(number) = rest.parse::<i32>() {
+            if (1..=24).contains(&number) {
+                let label = format!("F{number}");
+                return Some(UnityKey { vk: 0x70 + number - 1, modifier: false, hotkey: label.clone(), game_name: label });
+            }
+        }
+    }
+    if name.len() == 1 {
+        let ch = name.chars().next()?;
+        if ch.is_ascii_alphabetic() {
+            let upper = ch.to_ascii_uppercase().to_string();
+            return Some(UnityKey { vk: upper.as_bytes()[0] as i32, modifier: false, hotkey: upper.clone(), game_name: upper });
+        }
+    }
+    let (vk, modifier, hotkey, game_name) = match name {
+        // Unity Mouse3/Mouse4 are the side buttons. Mouse4 is the forward button.
+        "Mouse0" => (0x01, false, "Mouse0", "Mouse 0"),
+        "Mouse1" => (0x02, false, "Mouse1", "Mouse 1"),
+        "Mouse2" => (0x04, false, "Mouse2", "Mouse 2"),
+        "Mouse3" => (0x05, false, "Mouse4", "Mouse 3"),
+        "Mouse4" => (0x06, false, "Mouse5", "Mouse 4"),
+        "Print" | "SysReq" => (0x2C, false, "PrintScreen", "Print Screen"),
+        "Space" => (0x20, false, "Space", "Space"),
+        "Tab" => (0x09, false, "Tab", "Tab"),
+        "Escape" => (0x1B, false, "Escape", "Escape"),
+        "Return" | "KeypadEnter" => (0x0D, false, "Enter", "Enter"),
+        "BackQuote" => (0xC0, false, "BackQuote", "`"),
+        "CapsLock" => (0x14, false, "CapsLock", "Caps Lock"),
+        "LeftShift" => (0xA0, true, "LeftShift", "Left Shift"),
+        "RightShift" => (0xA1, true, "RightShift", "Right Shift"),
+        "LeftControl" => (0xA2, true, "LeftControl", "Left Ctrl"),
+        "RightControl" => (0xA3, true, "RightControl", "Right Ctrl"),
+        "LeftAlt" => (0xA4, true, "LeftAlt", "Left Alt"),
+        "RightAlt" => (0xA5, true, "RightAlt", "Right Alt"),
+        "Delete" => (0x2E, false, "Delete", "Delete"),
+        "Insert" => (0x2D, false, "Insert", "Insert"),
+        "Home" => (0x24, false, "Home", "Home"),
+        "End" => (0x23, false, "End", "End"),
+        "PageUp" => (0x21, false, "PageUp", "Page Up"),
+        "PageDown" => (0x22, false, "PageDown", "Page Down"),
+        "UpArrow" => (0x26, false, "Up", "Up"),
+        "DownArrow" => (0x28, false, "Down", "Down"),
+        "LeftArrow" => (0x25, false, "Left", "Left"),
+        "RightArrow" => (0x27, false, "Right", "Right"),
+        _ => return None,
+    };
+    Some(UnityKey { vk, modifier, hotkey: hotkey.into(), game_name: game_name.into() })
 }
 
 fn clamp_keep(value: u32) -> u32 {
@@ -417,48 +625,42 @@ fn clamp_auto(value: u32) -> u32 {
     value.clamp(2, 120)
 }
 
-fn conflicts(hotkey: &str, reserved: &[String]) -> bool {
-    let key = normalize_hotkey(hotkey);
-    reserved.iter().any(|item| {
-        let item = item.trim();
-        !item.is_empty() && normalize_hotkey(item).eq_ignore_ascii_case(&key)
-    })
-}
-
-fn hotkey_reserved(hotkey: &str) -> bool {
-    let mut reserved = Vec::new();
-    let miao = crate::miaomiao::get();
-    if miao.visual_enabled {
-        for scheme in &miao.schemes {
-            reserved.push(scheme.visual.hotkey.clone());
-        }
-    }
-    if miao.fitness.enabled {
-        reserved.push(miao.fitness.hotkey.clone());
-    }
-    let overlay = crate::overlay::get();
-    if overlay.hotkey_enabled {
-        reserved.push(overlay.hotkey);
-    }
-    conflicts(hotkey, &reserved)
-}
-
 fn game_foreground() -> bool {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd == 0 {
             return false;
         }
-        let mut buf = [0u16; 64];
-        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-        if len <= 0 {
+        let mut class = [0u16; 64];
+        let class_len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+        if class_len <= 0 {
             return false;
         }
-        String::from_utf16_lossy(&buf[..len as usize]) == "Escape from Tarkov"
+        let class = String::from_utf16_lossy(&class[..class_len as usize]);
+        let mut title = [0u16; 128];
+        let title_len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+        let title = if title_len > 0 {
+            String::from_utf16_lossy(&title[..title_len as usize])
+        } else {
+            String::new()
+        };
+        is_game_window(&class, &title)
     }
 }
 
+fn is_game_window(class: &str, title: &str) -> bool {
+    class == "UnityWndClass" && (title.to_ascii_lowercase().contains("tarkov") || title.contains("逃离"))
+}
+
 fn tap_key(vk: i32) {
+    if let Some((down, up, data)) = mouse_click(vk) {
+        unsafe {
+            mouse_event(down, 0, 0, data, 0);
+            thread::sleep(Duration::from_millis(40));
+            mouse_event(up, 0, 0, data, 0);
+        }
+        return;
+    }
     let vk = vk as u8;
     let (scan, flags) = if vk == 0x2C { (0x37u8, 0x0001u32) } else { (0, 0) };
     unsafe {
@@ -475,6 +677,9 @@ fn normalize_hotkey(raw: &str) -> String {
     }
     if key.eq_ignore_ascii_case("printscreen") || key.eq_ignore_ascii_case("print screen") || key.eq_ignore_ascii_case("prtsc") {
         return "PrintScreen".into();
+    }
+    if let Some(name) = mouse_name(key) {
+        return name.into();
     }
     let upper = key.to_ascii_uppercase();
     if vk_of(&upper).is_some() { upper } else { default_hotkey() }
@@ -508,22 +713,52 @@ fn prune_old(dir: &Path, keep_max: u32) {
     }
 }
 
-fn hotkey_edge(held: &mut bool) -> bool {
-    let settings = SETTINGS.lock().expect("shot-settings").clone();
-    let Some(vk) = vk_of(&settings.hotkey) else {
+fn mouse_click(vk: i32) -> Option<(u32, u32, u32)> {
+    match vk {
+        0x01 => Some((0x0002, 0x0004, 0)),
+        0x02 => Some((0x0008, 0x0010, 0)),
+        0x04 => Some((0x0020, 0x0040, 0)),
+        0x05 => Some((0x0080, 0x0100, 0x0001)),
+        0x06 => Some((0x0080, 0x0100, 0x0002)),
+        _ => None,
+    }
+}
+
+fn hotkey_edge(held: &mut bool, bind: &ShotBind) -> bool {
+    if bind.triggers.is_empty() {
         *held = false;
         return false;
-    };
-    let down = unsafe { GetAsyncKeyState(vk) < 0 };
+    }
+    let down = bind.modifiers.iter().chain(bind.triggers.iter()).all(|vk| unsafe { GetAsyncKeyState(*vk) < 0 });
     let edge = down && !*held;
     *held = down;
     edge
+}
+
+fn mouse_vk(name: &str) -> Option<i32> {
+    let folded = name.trim().to_ascii_uppercase().replace(' ', "");
+    match folded.as_str() {
+        "MOUSE4" | "XBUTTON1" => Some(0x05),
+        "MOUSE5" | "XBUTTON2" => Some(0x06),
+        _ => None,
+    }
+}
+
+fn mouse_name(name: &str) -> Option<&'static str> {
+    match mouse_vk(name) {
+        Some(0x05) => Some("Mouse4"),
+        Some(0x06) => Some("Mouse5"),
+        _ => None,
+    }
 }
 
 fn vk_of(name: &str) -> Option<i32> {
     let name = name.trim();
     if name.eq_ignore_ascii_case("PrintScreen") {
         return Some(0x2C);
+    }
+    if let Some(vk) = mouse_vk(name) {
+        return Some(vk);
     }
     let name = name.to_ascii_uppercase();
     if let Some(rest) = name.strip_prefix('F') {
@@ -548,8 +783,10 @@ fn vk_of(name: &str) -> Option<i32> {
 unsafe extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
     fn GetForegroundWindow() -> isize;
+    fn GetClassNameW(hwnd: isize, class: *mut u16, max: i32) -> i32;
     fn GetWindowTextW(hwnd: isize, text: *mut u16, max: i32) -> i32;
     fn keybd_event(vk: u8, scan: u8, flags: u32, extra: usize);
+    fn mouse_event(flags: u32, dx: u32, dy: u32, data: u32, extra: usize);
 }
 
 #[cfg(test)]
@@ -633,12 +870,45 @@ mod tests {
     }
 
     #[test]
-    fn blocks_keys_used_by_other_tools() {
-        let reserved = vec!["F2".into(), "F9".into(), "M".into()];
-        assert!(conflicts("f2", &reserved));
-        assert!(conflicts("m", &reserved));
-        assert!(!conflicts("PrintScreen", &reserved));
-        assert!(!conflicts("F8", &reserved));
+    fn accepts_tarkov_window_titles() {
+        assert!(is_game_window("UnityWndClass", "EscapeFromTarkov"));
+        assert!(is_game_window("UnityWndClass", "Escape from Tarkov"));
+        assert!(is_game_window("UnityWndClass", "逃离塔科夫"));
+        assert!(!is_game_window("UnityWndClass", "Notepad"));
+        assert!(!is_game_window("Chrome_WidgetWin_1", "Escape from Tarkov"));
+    }
+
+    #[test]
+    fn reads_game_screenshot_key() {
+        let text = r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["Mouse4"]},{"keyCode":[]}]}]}"#;
+        let bind = screenshot_bind(text).expect("bind");
+        assert_eq!(bind.triggers, vec![0x06]);
+        assert!(bind.modifiers.is_empty());
+        assert_eq!(bind.hotkey, "Mouse5");
+        assert_eq!(bind.game_name, "Mouse 4");
+        let back = screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["Mouse3"]}]}]}"#).expect("back");
+        assert_eq!(back.triggers, vec![0x05]);
+        assert_eq!(back.hotkey, "Mouse4");
+        assert_eq!(back.game_name, "Mouse 3");
+        let print = screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["SysReq"]}]}]}"#).expect("print");
+        assert_eq!(print.triggers, vec![0x2C]);
+        assert_eq!(print.hotkey, "PrintScreen");
+        let chord = screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["P","LeftAlt"]}]}]}"#).expect("chord");
+        assert_eq!(chord.modifiers, vec![0xA4]);
+        assert_eq!(chord.triggers, vec![b'P' as i32]);
+        assert_eq!(chord.game_name, "P + Left Alt");
+        assert!(screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":[]}]}]}"#).is_none());
+    }
+
+    #[test]
+    fn accepts_mouse_side_buttons() {
+        assert_eq!(normalize_hotkey("Mouse4"), "Mouse4");
+        assert_eq!(normalize_hotkey("mouse5"), "Mouse5");
+        assert_eq!(normalize_hotkey("XButton1"), "Mouse4");
+        assert_eq!(normalize_hotkey("xbutton2"), "Mouse5");
+        assert_eq!(vk_of("Mouse4"), Some(0x05));
+        assert_eq!(vk_of("Mouse5"), Some(0x06));
+        assert_eq!(normalize_hotkey("nope"), "PrintScreen");
     }
 
     #[test]

@@ -192,8 +192,8 @@ fn log_state() -> logwatch::WatchState {
 }
 
 #[tauri::command]
-async fn raid_status(app: tauri::AppHandle) -> overlay::RaidStatus {
-    overlay::raid_status(&app).await
+fn log_tails() -> logwatch::LogTails {
+    logwatch::tails()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -235,8 +235,8 @@ pub fn run() {
             overlay_set_guard,
             overlay_set_hotkey_live,
             overlay_return_focus,
-            raid_status,
-            log_state
+            log_state,
+            log_tails
         ])
         .setup(|app| {
             site::init(app.handle());

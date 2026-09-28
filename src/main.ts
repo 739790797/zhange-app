@@ -9,17 +9,17 @@ import { bossShell, mountBosses } from "./bossList";
 import { hideoutShell, mountHideout, openHideoutList } from "./hideout";
 import { keyShell, mountKeys, openKeyList } from "./keys";
 import { paintGoonBars, startGoonWatch } from "./goon";
-import { findMap, mapTitle } from "./mapNames";
-import { loadMapBoard, mapBoardHtml, mapBoardReady, paintMapPickGoon, resetMapBoard, setMapPreview } from "./mapPicker";
-import { closeLobbyDialog, lobbyShell, mountLobby, setLobbyNote } from "./lobby";
+import { findMap, mapTitle, sameMap } from "./mapNames";
+import { applyRoomSync, clearMapPresence, loadMapBoard, mapBoardHtml, mapBoardReady, noteLocalPhase, paintMapPickGoon, refreshMapBoard, resetMapBoard, setLocalWatch } from "./mapPicker";
+import { closeLobbyDialog, lobbyShell, mountLobby, setLobbyNote, setLobbyRoomKeep } from "./lobby";
 import { mountWorkbench, workbenchShell } from "./workbench";
 import { catalogShell, matchCatalog, mountCatalog, pinCatalogList } from "./itemCatalog";
 import { fadeIn, fadeOut } from "./motion";
 import { isPending, spin } from "./spinner";
 import { matchWiki, mountWiki, readWikiHits, wikiHref, wikiShell, type WikiHit } from "./wiki";
-import { bootOverlayShell, ensureOverlayState, onOverlayChange, onOverlayClick, onOverlayInput, onOverlayKey, overlayCardHtml, overlayDialogHtml, publishOverlayMap, setOverlayHotkeyLive, watchOverlayTyping } from "./overlay";
+import { bootOverlayShell, ensureOverlayState, onOverlayChange, onOverlayClick, onOverlayInput, onOverlayKey, overlayCardHtml, overlayDialogHtml, publishOverlayMap, watchOverlayTyping } from "./overlay";
 import { backNav, bindHistory, forwardNav, paintHistoryButtons, pushNav, replaceNav, syncNav } from "./navHistory";
-import { startPlayerSync } from "./playerFix";
+import { shotHotkeyLabel, startPlayerSync } from "./playerFix";
 import { mountTavernArticle, mountTavernList, setTavernReply, submitTavernComment, tavernArticleHtml, tavernCategoryHref, tavernListHtml, tavernMatch, tavernPageHref, tavernSearchHref } from "./tavern";
 
 watchMapTasks(
@@ -39,11 +39,13 @@ if (!rootNode) throw new Error("缺少根节点");
 const root = rootNode;
 
 type MapItem = { slug: string; name: string; english: string; thumbLink: string };
+type RoomClient = "web" | "desktop";
 type RoomMember = {
   userId: number;
   name: string;
   host: boolean;
   online: boolean;
+  clients: RoomClient[];
   inRoom: boolean;
 };
 type RoomClaim = { taskId: string; userId: number; name: string };
@@ -76,10 +78,16 @@ let roomPending = false;
 let roomTimer = 0;
 let roomLive = false;
 let socketRoomId = "";
+let accountPhaseSig = "";
+let accountPhaseReady = false;
+let accountViewSlug = "";
 let viewerName = "";
 let viewerId = 0;
 let claimSeedKey = "";
 let lastMapSlug = "";
+let gameInRaid = false;
+let gameMapSlug = "";
+let spectating = false;
 let ignoredRoomId = "";
 let mapPage: HTMLElement | null = null;
 let usageTimer = 0;
@@ -317,14 +325,8 @@ function mapView(slug: string) {
             <button type="button" data-collapse="room">收起</button>
           </header>
           <div class="room-actions">
-            <button type="button" data-room="public" id="room-public" hidden>改为公开</button>
-            <button type="button" data-room="private" id="room-private" hidden>设为私密</button>
             <button type="button" class="room-leave" data-room="leave">离开房间</button>
           </div>
-          <form class="room-form" id="room-settings" hidden>
-            <input name="password" placeholder="填写密码则设为私密，留空则改为公开" maxlength="32" />
-            <button type="submit">保存</button>
-          </form>
           <div id="room-live"></div>
         </section>
         <aside class="overlay left" id="filter-panel">
@@ -426,6 +428,7 @@ function toolsView() {
 
 type LogLive = {
   running: boolean;
+  ready: boolean;
   session: string;
   application: string;
   notices: string;
@@ -435,45 +438,72 @@ type LogLive = {
   inRaid: boolean;
   server: string;
   location: string;
+  phase: string;
+  raidId: string;
+  tailStamp: string;
 };
 type LogNote = { at: string; text: string };
-const logFeed: LogNote[] = [];
+let logActions: LogNote[] = [];
 let logTimer = 0;
-let seenSession = "";
-
-function logClock() {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-}
 
 function baseName(value: string) {
   const parts = value.split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] || value;
 }
 
-function noteLog(text: string) {
-  logFeed.unshift({ at: logClock(), text });
-  if (logFeed.length > 80) logFeed.length = 80;
+function logFileName(value: string) {
+  const name = baseName(value);
+  const space = name.lastIndexOf(" ");
+  return space > 0 ? name.slice(space + 1) : name;
+}
+
+function sessionClock(value: string) {
+  const name = baseName(value);
+  const mark = name.lastIndexOf("log_");
+  const source = mark >= 0 ? name.slice(mark + 4) : name;
+  const parts = source.split(/[._-]/);
+  const hour = parts[3] || "";
+  const minute = parts[4] || "";
+  const second = parts[5] || "";
+  if (!/^\d{1,2}$/.test(hour) || !/^\d{2}$/.test(minute) || !/^\d{2}$/.test(second)) return "—";
+  return `${hour.padStart(2, "0")}:${minute}:${second}`;
+}
+
+function feedHtml(items: LogNote[]) {
+  return items.length
+    ? items.map((item) => `<li><time>${esc(item.at)}</time><span>${esc(item.text)}</span></li>`).join("")
+    : `<li class="log-empty"><span>还没有触发</span></li>`;
+}
+
+function renderFeed() {
   const list = document.querySelector("#log-feed");
   if (!list) return;
-  list.innerHTML = logFeed.map((item) => `<li><time>${esc(item.at)}</time><span>${esc(item.text)}</span></li>`).join("");
+  const items = [...logActions].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 80);
+  list.innerHTML = feedHtml(items);
 }
 
 function logMonitorHtml() {
-  const feed = logFeed.length
-    ? logFeed.map((item) => `<li><time>${esc(item.at)}</time><span>${esc(item.text)}</span></li>`).join("")
-    : `<li class="log-empty"><span>还没有触发</span></li>`;
+  const feed = feedHtml([...logActions].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 80));
+  const pane = (id: string, title: string) => `
+    <article class="log-pane">
+      <h2>${title}</h2>
+      <pre id="${id}" class="log-empty">正在读取</pre>
+    </article>`;
   return `
     <section class="log-monitor">
-      <article>
-        <h2>当前日志</h2>
-        <dl id="log-status">${spin("正在读取")}</dl>
-      </article>
-      <article>
-        <h2>触发记录</h2>
-        <ol id="log-feed">${feed}</ol>
-      </article>
+      <div class="log-side">
+        <article>
+          <h2>当前日志</h2>
+          <dl id="log-status">${spin("正在读取")}</dl>
+        </article>
+        <article>
+          <h2>触发记录</h2>
+          <ol id="log-feed">${feed}</ol>
+        </article>
+      </div>
+      ${pane("log-app", "应用日志")}
+      ${pane("log-note", "通知日志")}
+      ${pane("log-back", "后端日志")}
     </section>`;
 }
 
@@ -482,33 +512,258 @@ function stopLogTimer() {
   logTimer = 0;
 }
 
+type LogTails = { application: string; notices: string; backend: string };
+
+const LOG_SLUG: Record<string, string> = {
+  city: "streets-of-tarkov",
+  tarkovstreets: "streets-of-tarkov",
+  streets: "streets-of-tarkov",
+  streets_of_tarkov: "streets-of-tarkov",
+  rezerv_base: "reserve",
+  rezervbase: "reserve",
+  reserve: "reserve",
+  shoreline: "shoreline",
+  woods: "woods",
+  forest: "woods",
+  bigmap: "customs",
+  customs: "customs",
+  interchange: "interchange",
+  shopping_mall: "interchange",
+  mall: "interchange",
+  laboratory: "the-lab",
+  labs: "the-lab",
+  lab: "the-lab",
+  lighthouse: "lighthouse",
+  factory: "factory",
+  factory_day: "factory",
+  factory4_day: "factory",
+  factory_night: "night-factory",
+  factory4_night: "night-factory",
+  sandbox: "ground-zero",
+  sandbox_high: "ground-zero",
+  ground_zero: "ground-zero",
+  groundzero: "ground-zero",
+  labyrinth: "the-labyrinth",
+  the_labyrinth: "the-labyrinth",
+  terminal: "terminal",
+  icebreaker: "icebreaker",
+  suburbs: "icebreaker",
+};
+
+function locationSlug(raw: string) {
+  return LOG_SLUG[raw.trim().toLowerCase().replace(/-/g, "_")] || "";
+}
+
+function clocked(line: string) {
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(line);
+}
+
+function lineClock(line: string) {
+  const match = /^(\d{4}-\d{2}-\d{2} )(\d{2}:\d{2}:\d{2})/.exec(line);
+  return match?.[2] || "";
+}
+
+function sceneSlug(line: string) {
+  const marker = "scene preset path:";
+  const index = line.indexOf(marker);
+  if (index < 0) return "";
+  const rest = line.slice(index + marker.length);
+  const lower = rest.toLowerCase();
+  if (lower.includes("hideout") || lower.includes("menu") || lower.includes("empty_preset")) return "";
+  const token = rest.trim().split(/\s+/)[0] || "";
+  const file = token.split(/[/\\]/).pop() || token;
+  const stem = file.split("_preset")[0].replace(/\.bundle$/i, "");
+  return locationSlug(stem);
+}
+
+function fieldValue(line: string, key: string) {
+  const index = line.indexOf(key);
+  if (index < 0) return "";
+  return line.slice(index + key.length).trim().split(/[,']/)[0]?.trim() || "";
+}
+
+function triggerAction(line: string) {
+  const mode = /Session mode:\s*([^\s|]+)/i.exec(line);
+  if (mode) {
+    const key = mode[1].toLowerCase();
+    if (key === "pve") return "游戏模式改为 PVE";
+    if (key === "pvp" || key === "regular") return "游戏模式改为 PVP";
+  }
+  if (line.includes("scene preset path:")) {
+    const lower = line.toLowerCase();
+    if (lower.includes("hideout") || lower.includes("menu") || lower.includes("empty_preset")) return "回到菜单，战局结束";
+    const slug = sceneSlug(line);
+    if (slug) return `切到${shownMap(slug)}`;
+  }
+  if (line.includes("LocationLoaded") && !line.includes("LocationLoadedTime")) return "进入匹配";
+  if (line.includes("GameStarting") && !line.includes("GameStarted")) return "战局启动";
+  if (line.includes("GameStarted:") && clocked(line)) return "战局开始";
+  if (line.includes("Network game matching aborted") || line.includes("Network game matching cancelled")) return "匹配取消";
+  if (line.includes("Got notification | UserMatchOver")) return "战局结束";
+  if (line.includes("---> Request") && line.includes("/client/match/local/end")) return "战局结束";
+  if (line.includes("TRACE-NetworkGameCreate profileStatus")) {
+    const raw = fieldValue(line, "Location:");
+    const slug = locationSlug(raw);
+    const name = slug ? shownMap(slug) : raw;
+    return name ? `匹配成功，地点${name}` : "匹配成功";
+  }
+  return "";
+}
+
+function jsonObject(text: string) {
+  const start = text.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === "\"") inStr = false;
+      continue;
+    }
+    if (ch === "\"") inStr = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+function questAction(json: string) {
+  try {
+    const parsed = JSON.parse(json) as { message?: Record<string, unknown> };
+    const message = parsed.message || (parsed as Record<string, unknown>);
+    const type = Number(message.type ?? message.Type);
+    const label = type === 12 ? "任务完成" : type === 11 ? "任务失败" : type === 10 ? "任务开始" : "";
+    if (!label) return "";
+    const raw = String(message.templateId || message.TemplateId || message.questId || message.QuestId || "");
+    const id = raw.trim().split(/\s+/)[0] || "";
+    if (!/^[a-f0-9]{20,32}$/i.test(id)) return "";
+    return `${label} ${id}`;
+  } catch {
+    return "";
+  }
+}
+
+function lineActions(text: string) {
+  const lines = text.split("\n");
+  const actions = lines.map((line) => triggerAction(line));
+  let search = 0;
+  while (search < text.length) {
+    const index = text.indexOf("ChatMessageReceived", search);
+    if (index < 0) break;
+    search = index + "ChatMessageReceived".length;
+    const action = questAction(jsonObject(text.slice(search)));
+    if (!action) continue;
+    const line = text.slice(0, index).split("\n").length - 1;
+    actions[line] = action;
+  }
+  return actions;
+}
+
+function triggerNotes(text: string) {
+  const lines = text.split("\n");
+  const actions = lineActions(text);
+  const notes: LogNote[] = [];
+  const seen = new Set<string>();
+  lines.forEach((line, index) => {
+    const action = actions[index];
+    if (!action) return;
+    const at = lineClock(line) || "—";
+    const key = `${at}|${action}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    notes.push({ at, text: action });
+  });
+  return notes;
+}
+
+function lineSpan(line: string, action: string) {
+  return `<span${action ? ` class="log-hit" title="${esc(action)}"` : ""}>${esc(line) || " "}</span>`;
+}
+
+function paintTail(id: string, text: string, ready: boolean) {
+  const node = document.querySelector<HTMLElement>(id);
+  if (!node) return;
+  const next = text.trim() ? text.replace(/\r\n/g, "\n") : ready ? "还没有日志" : "正在读取";
+  const prev = node.dataset.raw || "";
+  if (prev === next) return;
+  node.dataset.raw = next;
+  node.classList.toggle("log-empty", !text.trim());
+  const stick = node.scrollHeight - node.scrollTop - node.clientHeight < 64;
+  if (!text.trim()) {
+    node.textContent = next;
+    if (stick) node.scrollTop = node.scrollHeight;
+    return;
+  }
+  const body = next.endsWith("\n") ? next.slice(0, -1) : next;
+  const prevBody = prev.endsWith("\n") ? prev.slice(0, -1) : prev;
+  const grew = Boolean(prevBody && text.trim() && body.startsWith(`${prevBody}\n`) && node.childElementCount > 0);
+  if (grew) {
+    const extra = body.slice(prevBody.length + 1);
+    const actions = lineActions(extra);
+    node.insertAdjacentHTML("beforeend", extra.split("\n").map((line, index) => lineSpan(line, actions[index] || "")).join(""));
+    if (stick) node.scrollTop = node.scrollHeight;
+    return;
+  }
+  const lines = body.split("\n");
+  const actions = lineActions(body);
+  node.innerHTML = lines.map((line, index) => lineSpan(line, actions[index] || "")).join("");
+  if (stick) node.scrollTop = node.scrollHeight;
+}
+
+let seenTailStamp = "";
+let cachedTails: LogTails | null = null;
+
 async function refreshLogMonitor() {
   const host = document.querySelector("#log-status");
   if (!host) return;
   const live = await invoke<LogLive>("log_state").catch(() => null);
   if (!document.querySelector("#log-status") || !live) return;
-  if (live.running && live.session && live.session !== seenSession) {
-    seenSession = live.session;
-    noteLog(`锁定会话 ${baseName(live.session)}`);
-  }
-  if (!live.running && seenSession) {
-    seenSession = "";
-    noteLog("游戏已退出，停止读取日志");
-  }
   const mapName = live.slug ? shownMap(live.slug) : "—";
-  const rows: [string, string][] = [
-    ["游戏", live.running ? "正在运行" : "未检测到"],
-    ["会话", live.session ? baseName(live.session) : "未锁定"],
-    ["应用日志", live.application ? baseName(live.application) : "—"],
-    ["通知日志", live.notices ? baseName(live.notices) : "—"],
-    ["后端日志", live.backend ? baseName(live.backend) : "—"],
-    ["地图", mapName],
-    ["模式", live.mode ? live.mode.toUpperCase() : "—"],
-    ["战局", live.inRaid ? "进行中" : "未开始"],
-    ["服务器", live.inRaid ? live.server || "未知" : "—"],
-    ["地点", live.location ? shownMap(live.location) : "—"],
+  const raid = !live.ready ? "正在读取" : live.inRaid ? "进行中" : live.phase === "raid_exited" || live.phase === "matching_aborted" ? "已结束" : "未开始";
+  const shown = (value: string) => value ? logFileName(value) : "—";
+  const full = (value: string) => value ? baseName(value) : "";
+  const rows: [string, string, string][] = [
+    ["游戏", live.running ? "正在运行" : "未检测到", ""],
+    ["启动时间", live.session ? sessionClock(live.session) : "—", live.session ? baseName(live.session) : ""],
+    ["应用日志", shown(live.application), full(live.application)],
+    ["通知日志", shown(live.notices), full(live.notices)],
+    ["后端日志", shown(live.backend), full(live.backend)],
+    ["地图", mapName, ""],
+    ["模式", live.mode ? live.mode.toUpperCase() : "—", ""],
+    ["战局", raid, ""],
+    ["服务器", live.server || (live.inRaid ? "未知" : "—"), ""],
+    ["地点", live.location ? shownMap(live.location) : "—", ""],
   ];
-  host.innerHTML = rows.map(([label, value]) => `<dt>${esc(label)}</dt><dd title="${esc(value)}">${esc(value)}</dd>`).join("");
+  host.innerHTML = rows.map(([label, value, title]) => `<dt>${esc(label)}</dt><dd title="${esc(title || value)}">${esc(value)}</dd>`).join("");
+  if (!live.ready) {
+    seenTailStamp = "";
+    cachedTails = null;
+    return;
+  }
+  if (!cachedTails || live.tailStamp !== seenTailStamp) {
+    const tails = await invoke<LogTails>("log_tails").catch(() => null);
+    if (!tails || !document.querySelector("#log-status")) return;
+    cachedTails = tails;
+    seenTailStamp = live.tailStamp;
+  }
+  const tails = cachedTails;
+  if (!tails) return;
+  paintTail("#log-app", tails.application, true);
+  paintTail("#log-note", tails.notices, true);
+  paintTail("#log-back", tails.backend, true);
+  logActions = [
+    ...triggerNotes(tails.application.replace(/\r\n/g, "\n")),
+    ...triggerNotes(tails.notices.replace(/\r\n/g, "\n")),
+    ...triggerNotes(tails.backend.replace(/\r\n/g, "\n")),
+  ];
+  renderFeed();
 }
 
 function plainView(title: string, text: string) {
@@ -643,6 +898,7 @@ function readDetail(value: Record<string, unknown>): RoomDetail | null {
         name: String(item.display_name || item.displayName || "成员"),
         host: Boolean(item.is_host || item.isHost),
         online: Boolean(item.online),
+        clients: roomClients(item.clients),
         inRoom: item.in_room !== false && item.inRoom !== false,
       };
     }),
@@ -662,6 +918,43 @@ function readDetail(value: Record<string, unknown>): RoomDetail | null {
       return [{ taskId, objectiveId, userId }];
     }),
   };
+}
+
+function roomClients(raw: unknown): RoomClient[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RoomClient[] = [];
+  for (const item of raw) {
+    const kind = String(item || "").trim();
+    if (kind === "web" || kind === "desktop") out.push(kind);
+  }
+  return out;
+}
+
+function readClientMap(payload: Record<string, unknown>) {
+  if (!Array.isArray(payload.online_clients)) return null;
+  const map = new Map<number, RoomClient[]>();
+  for (const item of payload.online_clients) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const userId = Number(row.user_id || row.userId || 0);
+    if (!userId) continue;
+    map.set(userId, roomClients(row.clients));
+  }
+  return map;
+}
+
+function shownClients(member: RoomMember) {
+  const clients = [...member.clients];
+  if (member.userId === viewerId && roomLive && !clients.includes("desktop")) clients.push("desktop");
+  return clients;
+}
+
+function onlineLabel(member: RoomMember) {
+  const clients = shownClients(member);
+  if (clients.length >= 2) return "在线·多端";
+  if (clients.includes("web")) return "在线·网页";
+  if (clients.includes("desktop")) return "在线·桌面";
+  return member.online ? "在线" : "离线";
 }
 
 function roomCode(id: string) {
@@ -690,14 +983,7 @@ function applyDetail(detail: RoomDetail, slug: string, password = room.password)
   };
 }
 
-function syncOverlayHotkey() {
-  const detail = room.detail;
-  const mine = detail?.members.find((item) => (viewerId && item.userId === viewerId) || (viewerName && item.name === viewerName));
-  setOverlayHotkeyLive(Boolean(room.id && detail && !room.error && mine?.inRoom));
-}
-
 function paintRoomCard() {
-  syncOverlayHotkey();
   const live = document.querySelector("#room-live");
   const code = document.querySelector("#room-code");
   if (!live || !code) return;
@@ -717,19 +1003,15 @@ function paintRoomCard() {
   code.textContent = roomCode(detail.id);
   const memberHtml = people.map((item) => {
     const mine = item.name === viewerName || (detail.isHost && item.host);
+    const on = item.online || shownClients(item).length > 0;
     return `<li>
-      <span class="room-dot" data-on="${item.online ? "1" : "0"}"></span>
+      <span class="room-dot" data-on="${on ? "1" : "0"}"></span>
       <span class="room-name">${esc(item.name)}</span>
       ${mine ? `<span class="room-tag you">你</span>` : ""}
       ${item.host ? `<span class="room-tag host">队长</span>` : ""}
-      <span class="room-state">${item.online ? "在线" : "离线"}</span>
+      <span class="room-state">${esc(onlineLabel(item))}</span>
     </li>`;
   }).join("");
-  const publicButton = document.querySelector<HTMLButtonElement>("#room-public");
-  const privateButton = document.querySelector<HTMLButtonElement>("#room-private");
-  const published = detail.listed && !detail.hasPassword && !room.password;
-  if (publicButton) publicButton.hidden = !detail.isHost || published;
-  if (privateButton) privateButton.hidden = !detail.isHost || !published;
   live.innerHTML = `<ul class="room-members">${memberHtml || `<li><span class="room-name">${esc(viewerName || "你")}</span></li>`}</ul>`;
 }
 
@@ -842,15 +1124,111 @@ function syncRoomSocket() {
   void invoke("room_watch", { publicId: room.id }).catch(() => undefined);
 }
 
-function markOnline(detail: RoomDetail, ids: number[]) {
-  const online = new Set(ids);
-  detail.members = detail.members.map((row) => ({ ...row, online: online.has(row.userId) }));
+function markPresence(detail: RoomDetail, ids: number[] | null, clients: Map<number, RoomClient[]> | null) {
+  const online = ids ? new Set(ids) : null;
+  detail.members = detail.members.map((row) => {
+    const nextClients = clients ? clients.get(row.userId) ?? [] : row.clients;
+    const nextOnline = online ? online.has(row.userId) : nextClients.length > 0 || row.online;
+    return { ...row, online: nextOnline, clients: nextClients };
+  });
+}
+
+function viewerStillSeated(snap: Record<string, unknown>) {
+  const occupants = Array.isArray(snap.occupants) ? snap.occupants : null;
+  const members = Array.isArray(snap.members) ? snap.members : null;
+  const rows = occupants && occupants.length ? occupants : members;
+  if (!rows || !viewerId) return true;
+  return rows.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const row = item as Record<string, unknown>;
+    if (Number(row.user_id || row.userId || 0) !== viewerId) return false;
+    return row.in_room !== false && row.inRoom !== false;
+  });
+}
+
+function accountSlug(raw: string) {
+  const text = raw.trim();
+  if (!text) return "";
+  return findMap(text, maps)?.slug || text;
+}
+
+function rowListSlug(raw: unknown) {
+  if (!Array.isArray(raw) || !viewerId) return "";
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (Number(row.user_id || row.userId || 0) !== viewerId) continue;
+    return String(row.map_slug || row.mapSlug || "").trim();
+  }
+  return "";
+}
+
+function rowListPhase(raw: unknown) {
+  if (!Array.isArray(raw) || !viewerId) return null;
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (Number(row.user_id || row.userId || 0) !== viewerId) continue;
+    const kind = String(row.kind || "").trim();
+    if (!kind) continue;
+    return {
+      kind,
+      mapId: String(row.map_id || row.mapId || "").trim(),
+      raidId: String(row.raid_id || row.raidId || "").trim(),
+    };
+  }
+  return null;
+}
+
+function openSyncedMap(slug: string) {
+  const next = accountSlug(slug);
+  if (!next || !room.id || roomPending) return;
+  if (sameMap(liveMapSlug(), next)) return;
+  room.slug = next;
+  lastMapSlug = next;
+  spectating = !gameInRaid;
+  setLocalWatch(gameInRaid ? "" : next);
+  go(`/主菜单/逃离塔科夫/实时地图/${next}`);
+}
+
+function openSyncedPicker() {
+  if (!room.id || roomPending || onMapPicker()) return;
+  spectating = false;
+  setLocalWatch("");
+  lastMapSlug = "";
+  resetMapBoard();
+  go("/主菜单/逃离塔科夫/实时地图");
+}
+
+function followAccount(payload: Record<string, unknown>, snap: Record<string, unknown> | null) {
+  if (!room.id || roomPending) return;
+  const phase = rowListPhase(payload.log_phases) || rowListPhase(snap?.log_phases);
+  const leaving = phase?.kind === "raid_exited" || phase?.kind === "matching_aborted";
+  if (phase) {
+    const sig = `${room.id}:${phase.kind}:${phase.mapId}:${phase.raidId}`;
+    const changed = accountPhaseReady && accountPhaseSig !== sig;
+    const first = !accountPhaseReady;
+    accountPhaseSig = sig;
+    accountPhaseReady = true;
+    const entered = phase.kind === "match_found" || phase.kind === "raid_starting" || phase.kind === "raid_started";
+    if ((changed || first) && entered && phase.mapId) openSyncedMap(phase.mapId);
+    else if (changed && leaving) {
+      openSyncedPicker();
+      return;
+    }
+  }
+  const view = rowListSlug(payload.view_maps) || rowListSlug(snap?.view_maps);
+  if (!view) return;
+  const next = accountSlug(view);
+  if (accountViewSlug && sameMap(accountViewSlug, next)) return;
+  accountViewSlug = next;
+  if (!path().startsWith("/主菜单/逃离塔科夫/实时地图")) return;
+  openSyncedMap(next);
 }
 
 function adoptRoom(detail: RoomDetail) {
   room.detail = detail;
   room.id = detail.id || room.id;
-  syncOverlayHotkey();
   room.error = "";
   room.status = `私人房间 ${roomCode(room.id)}`;
   const nextSlug = detail.mapSlug;
@@ -867,6 +1245,7 @@ function adoptRoom(detail: RoomDetail) {
 }
 
 function onRoomSync(payload: Record<string, unknown>) {
+  if (applyRoomSync(payload) && onMapPicker()) refreshMapBoard();
   const event = String(payload.event || "");
   if (event === "closed") {
     roomLive = false;
@@ -878,6 +1257,7 @@ function onRoomSync(payload: Record<string, unknown>) {
   const online = Array.isArray(payload.online_user_ids)
     ? payload.online_user_ids.map((item) => Number(item))
     : null;
+  const clients = readClientMap(payload);
   const snap = payload.snapshot && typeof payload.snapshot === "object"
     ? payload.snapshot as Record<string, unknown>
     : null;
@@ -887,22 +1267,23 @@ function onRoomSync(payload: Record<string, unknown>) {
     window.clearInterval(roomTimer);
     const detail = readDetail(snap);
     if (!detail) return;
-    if (online) markOnline(detail, online);
-    if (snap.is_member === false) {
-      room.error = "已不在该房间";
-      room.detail = detail;
-      paintRoomCard();
+    if (online || clients) markPresence(detail, online, clients);
+    const kicked = event === "member_leave" && Number(payload.user_id || payload.userId || 0) === viewerId;
+    if (kicked || !viewerStillSeated(snap)) {
+      exitToLobby();
       return;
     }
     adoptRoom(detail);
+    followAccount(payload, snap);
     return;
   }
-  if (event === "presence" && online && room.detail) {
+  if ((event === "presence" || online || clients) && room.detail && (online || clients)) {
     roomLive = true;
     window.clearInterval(roomTimer);
-    markOnline(room.detail, online);
+    markPresence(room.detail, online, clients);
     paintRoomCard();
   }
+  if (event === "log_phase" || event === "view_map") followAccount(payload, null);
 }
 
 async function refreshRoom() {
@@ -984,8 +1365,28 @@ function clearRoomLocal(bump = true) {
   if (room.id) ignoredRoomId = room.id;
   room = { slug: "", id: "", status: "", error: "", password: "", detail: null };
   claimSeedKey = "";
-  setOverlayHotkeyLive(false);
+  accountPhaseSig = "";
+  accountPhaseReady = false;
+  accountViewSlug = "";
   if (watching) void invoke("room_unwatch").catch(() => undefined);
+  clearMapPresence();
+}
+
+let droppingRoom = "";
+
+function dropUnpickedRoom() {
+  const current = path();
+  if (current.startsWith("/主菜单/逃离塔科夫/实时地图")) return;
+  const slug = (room.slug || room.detail?.mapSlug || "").trim();
+  const id = room.id;
+  const count = room.detail?.memberCount ?? 1;
+  if (!id || slug || roomPending || count > 1 || droppingRoom === id) return;
+  droppingRoom = id;
+  clearRoomLocal();
+  void invoke("site_post", { path: `/guides/tarkov/raid-rooms/${id}/leave`, body: {} }).catch(() => undefined).finally(() => {
+    if (droppingRoom === id) droppingRoom = "";
+    if (path() === "/主菜单/逃离塔科夫/联机大厅") void mountLobby(true);
+  });
 }
 
 function exitToMapPicker() {
@@ -1032,7 +1433,8 @@ async function createPublicRoom(title: string, listed: boolean, password: string
     closeLobbyDialog();
     lastMapSlug = "";
     resetMapBoard();
-    go("/主菜单/逃离塔科夫/实时地图");
+    if (gameInRaid && gameMapSlug) void switchRoomMap(gameMapSlug);
+    else go("/主菜单/逃离塔科夫/实时地图");
   } catch (error) {
     if (seq !== roomSeq) return;
     setLobbyNote(failText(error, "创建房间失败"));
@@ -1076,7 +1478,34 @@ async function switchRoomMap(slug: string) {
   render();
 }
 
+function liveMapSlug() {
+  const prefix = "/主菜单/逃离塔科夫/实时地图/";
+  const current = path();
+  if (!current.startsWith(prefix)) return "";
+  return decodeURIComponent(current.slice(prefix.length).split("/")[0] || "");
+}
+
+function syncLocalWatch() {
+  if (gameInRaid) {
+    spectating = false;
+    setLocalWatch("");
+    return;
+  }
+  const slug = liveMapSlug();
+  if (slug) spectating = true;
+  setLocalWatch(spectating ? (slug || room.slug || "") : "");
+}
+
+function openLiveRaidMap() {
+  if (!room.id || !gameInRaid || !gameMapSlug || roomPending) return;
+  if (liveMapSlug() && sameMap(liveMapSlug(), gameMapSlug)) return;
+  void switchRoomMap(gameMapSlug);
+}
+
 function paint() {
+  dropUnpickedRoom();
+  syncLocalWatch();
+  if (path() === "/主菜单/逃离塔科夫/联机大厅") lastMapSlug = "";
   if (!onMapPicker()) resetMapBoard();
   stopLogTimer();
   const current = path();
@@ -1181,6 +1610,10 @@ function paint() {
     if (maps.length && !mapBoardReady()) {
       void loadMapBoard({ roomId: room.id, viewerId, viewerName }, maps).then((found) => {
         rememberBoardRoom(found);
+        if (gameInRaid && gameMapSlug && room.id) {
+          openLiveRaidMap();
+          return;
+        }
         if (onMapPicker()) render();
       });
     }
@@ -1305,10 +1738,9 @@ type ToolState = {
   status: string;
 };
 let toolState: ToolState | null = null;
-let hotkeyCapture: { kind: "scheme"; index: number } | { kind: "fitness" } | { kind: "shot" } | null = null;
-type ShotSettings = { syncEnabled: boolean; pruneEnabled: boolean; keepMax: number; hotkey: string; autoEnabled: boolean; autoSecs: number };
+let hotkeyCapture: { kind: "scheme"; index: number } | { kind: "fitness" } | null = null;
+type ShotSettings = { syncEnabled: boolean; pruneEnabled: boolean; keepMax: number; hotkey: string; autoEnabled: boolean; autoSecs: number; hotkeyFromGame?: boolean; gameHotkey?: string };
 let shotSettings: ShotSettings = { syncEnabled: true, pruneEnabled: false, keepMax: 20, hotkey: "PrintScreen", autoEnabled: false, autoSecs: 5 };
-let shotHintToken = 0;
 let shotSaveToken = 0;
 
 function consumeLocate() {
@@ -1316,10 +1748,6 @@ function consumeLocate() {
   if (!pending) return;
   sessionStorage.removeItem("zhange.locateTask");
   void locateQuest(pending);
-}
-
-function shotHotkeyLabel(key: string) {
-  return !key || key === "PrintScreen" ? "Print Screen" : key;
 }
 
 function shotSettingsDialogHtml() {
@@ -1330,8 +1758,8 @@ function shotSettingsDialogHtml() {
         <header><strong>截图设置</strong><button type="button" id="shot-settings-close">关闭</button></header>
         <div class="shot-settings-body">
           <div class="shot-settings">
-            <label><input id="shot-sync" type="checkbox" ${syncOn ? "checked" : ""} />截图同步</label>
-            <button type="button" id="shot-hotkey">${esc(shotHotkeyLabel(shotSettings.hotkey))}</button>
+            <label><input id="shot-sync" type="checkbox" ${syncOn ? "checked" : ""} /><span id="shot-key-label">${esc(shotKeyLabel())}</span></label>
+            <span id="shot-hotkey">${esc(shotKeyText())}</span>
           </div>
           <div class="shot-settings${syncOn ? "" : " is-locked"}" id="shot-prune-row">
             <label><input id="shot-prune" type="checkbox" ${shotSettings.pruneEnabled ? "checked" : ""} ${syncOn ? "" : "disabled"} />截图多于</label>
@@ -1340,50 +1768,32 @@ function shotSettingsDialogHtml() {
           </div>
           <div class="shot-settings${syncOn ? "" : " is-locked"}" id="shot-auto-row">
             <label><input id="shot-auto" type="checkbox" ${shotSettings.autoEnabled ? "checked" : ""} ${syncOn ? "" : "disabled"} />每隔</label>
-            <input id="shot-every" type="number" min="2" max="120" value="${shotSettings.autoSecs}" ${syncOn && shotSettings.autoEnabled ? "" : "disabled"} />
+            <input id="shot-every" type="number" inputmode="numeric" min="2" max="120" step="1" value="${shotSettings.autoSecs}" ${syncOn && shotSettings.autoEnabled ? "" : "disabled"} />
             <span>秒自动截图</span>
           </div>
-          <p class="shot-hint" id="shot-hint"></p>
         </div>
       </div>
     </div>`;
 }
 
-function shotKeyNorm(key: string) {
-  const raw = key.trim().toLowerCase().replace(/\s+/g, "");
-  if (!raw || raw === "printscreen" || raw === "prtsc") return "PRINTSCREEN";
-  return key.trim().toUpperCase();
+function shotIntervalText(raw: string) {
+  return raw.replace(/\D/g, "");
 }
 
-async function shotHotkeyBlocked(hotkey: string) {
-  const mine = shotKeyNorm(hotkey);
-  const keys: string[] = [];
-  const tools = toolState || await invoke<ToolState>("miaomiao_get").catch(() => null);
-  if (tools && tools.visualEnabled !== false) {
-    for (const scheme of tools.schemes) keys.push(scheme.visual.hotkey);
-  }
-  if (tools?.fitness.enabled) keys.push(tools.fitness.hotkey);
-  const overlay = await ensureOverlayState();
-  if (overlay?.hotkeyEnabled) keys.push(overlay.hotkey);
-  return keys.some((key) => key && shotKeyNorm(key) === mine);
+function shotIntervalSecs(raw: string) {
+  const digits = shotIntervalText(raw);
+  const value = Number(digits);
+  if (!digits || !Number.isInteger(value) || value < 2) return 2;
+  return Math.min(120, value);
 }
 
-function paintShotHint() {
-  const hint = document.querySelector("#shot-hint");
-  if (!hint) return;
-  const token = ++shotHintToken;
-  void shotHotkeyBlocked(shotSettings.hotkey).then((blocked) => {
-    if (token !== shotHintToken || !hint.isConnected) return;
-    if (blocked) {
-      hint.textContent = "这个键和妙妙快捷键重复，自动截图不会按。";
-      return;
-    }
-    if (!shotSettings.hotkey || shotSettings.hotkey === "PrintScreen") {
-      hint.textContent = "进入战局且游戏在前台时自动按这个键。若系统把 Print Screen 用作截图工具，游戏里不会生成带坐标的图。";
-      return;
-    }
-    hint.textContent = "进入战局且游戏在前台时自动按这个键。";
-  });
+function shotKeyLabel() {
+  return shotSettings.hotkeyFromGame ? "截图按键已读取到：" : "未从游戏读到按键，沿用：";
+}
+
+function shotKeyText() {
+  if (shotSettings.hotkeyFromGame && shotSettings.gameHotkey) return shotSettings.gameHotkey;
+  return shotHotkeyLabel(shotSettings.hotkey);
 }
 
 function paintShotDialog() {
@@ -1415,21 +1825,25 @@ function paintShotDialog() {
   }
   pruneRow?.classList.toggle("is-locked", !syncOn);
   autoRow?.classList.toggle("is-locked", !syncOn);
-  if (hotkey && hotkeyCapture?.kind !== "shot") hotkey.textContent = shotHotkeyLabel(shotSettings.hotkey);
-  paintShotHint();
+  if (hotkey) hotkey.textContent = shotKeyText();
+  const caption = document.querySelector("#shot-key-label");
+  if (caption) caption.textContent = shotKeyLabel();
 }
 
 function openShotSettings() {
-  paintShotDialog();
-  const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
-  if (modal) fadeIn(modal);
+  void invoke<ShotSettings>("shot_settings_get").then((saved) => {
+    rememberShotSettings(saved);
+    paintShotDialog();
+    const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
+    if (modal) fadeIn(modal);
+  }).catch(() => {
+    paintShotDialog();
+    const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
+    if (modal) fadeIn(modal);
+  });
 }
 
 function closeShotSettings() {
-  if (hotkeyCapture?.kind === "shot") {
-    hotkeyCapture = null;
-    setShotCapture(false);
-  }
   const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
   if (modal) void fadeOut(modal);
   paintShotDialog();
@@ -1443,15 +1857,14 @@ function rememberShotSettings(next: ShotSettings) {
     hotkey: next.hotkey || "PrintScreen",
     autoEnabled: Boolean(next.autoEnabled),
     autoSecs: Math.min(120, Math.max(2, Math.floor(Number(next.autoSecs) || 5))),
+    hotkeyFromGame: Boolean(next.hotkeyFromGame),
+    gameHotkey: next.gameHotkey || "",
   };
-}
-
-function setShotCapture(on: boolean) {
-  void invoke("shot_capture_set", { capturing: on }).catch(() => undefined);
 }
 
 async function saveShotSettings(patch: Partial<ShotSettings> = {}) {
   rememberShotSettings({ ...shotSettings, ...patch });
+  paintShotDialog();
   const token = ++shotSaveToken;
   const saved = await invoke<ShotSettings>("shot_settings_set", { settings: shotSettings });
   if (token !== shotSaveToken) return;
@@ -1594,65 +2007,94 @@ async function setGameMode(mode: "pvp" | "pve") {
 
 type LogWatch = { kind: string; slug: string; mode: string; questKind: string; taskId: string; phase?: string; raidId?: string };
 
-function playRaidChime() {
-  const Ctx = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  if (!Ctx) return;
-  const ctx = new Ctx();
-  const tone = (freq: number, at: number) => {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "square";
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.0001, at);
-    gain.gain.exponentialRampToValueAtTime(0.06, at + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.16);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(at);
-    osc.stop(at + 0.18);
-  };
-  const now = ctx.currentTime;
-  tone(880, now);
-  tone(1175, now + 0.14);
-  window.setTimeout(() => void ctx.close(), 700);
+function raidPhase(kind: string) {
+  return kind === "match_found" || kind === "raid_starting" || kind === "raid_started";
+}
+
+function noteGame(input: { inRaid?: boolean; slug?: string; phase?: string }) {
+  if (input.slug) gameMapSlug = input.slug;
+  const phase = input.phase || "";
+  if (phase === "raid_exited" || phase === "matching_aborted") {
+    gameInRaid = false;
+    gameMapSlug = "";
+    return;
+  }
+  if (input.inRaid === true || raidPhase(phase)) {
+    gameInRaid = true;
+    return;
+  }
+  if (input.inRaid === false) gameInRaid = false;
+}
+
+function returnToMapPicker() {
+  spectating = false;
+  setLocalWatch("");
+  lastMapSlug = "";
+  if (!path().startsWith("/主菜单/逃离塔科夫/实时地图/")) return;
+  resetMapBoard();
+  go("/主菜单/逃离塔科夫/实时地图");
 }
 
 async function onLogWatch(event: LogWatch) {
+  if (event.kind === "phase" || event.kind === "map" || event.kind === "raid-end") {
+    noteLocalPhase(event.kind === "raid-end" ? { kind: "raid_exited" } : { kind: event.phase, mapId: event.slug });
+    if (event.kind === "raid-end") noteGame({ inRaid: false, phase: "raid_exited" });
+    else noteGame({ slug: event.slug, phase: event.phase });
+    syncLocalWatch();
+    if (onMapPicker()) refreshMapBoard();
+  }
+  if (event.kind === "raid-end" || event.phase === "raid_exited" || event.phase === "matching_aborted") {
+    returnToMapPicker();
+  } else if (gameInRaid) {
+    openLiveRaidMap();
+  }
   const state = await ensureOverlayState();
-  if (event.kind === "map" && event.slug) {
-    const name = shownMap(event.slug);
-    const here = path().endsWith(`/实时地图/${event.slug}`);
-    if (state?.autoFollow === false) noteLog(`检测到 ${name}，自动切图已关闭`);
-    else if (path() === "/登录") noteLog(`检测到 ${name}，登录页不切图`);
-    else if (here) noteLog(`检测到 ${name}，已在这张图`);
-    else {
-      noteLog(room.id ? `房间切到 ${name}` : `切到 ${name}`);
-      if (room.id) void switchRoomMap(event.slug);
-      else {
-        lastMapSlug = event.slug;
-        go(`/主菜单/逃离塔科夫/实时地图/${event.slug}`);
-      }
-    }
+  if (event.kind === "map" && event.slug && state?.autoFollow !== false && room.id && path() !== "/登录" && !sameMap(liveMapSlug(), event.slug)) {
+    gameMapSlug = event.slug;
+    if (gameInRaid) void switchRoomMap(event.slug);
   }
   if (event.kind === "mode" && (event.mode === "pvp" || event.mode === "pve")) {
-    noteLog(`游戏模式改为 ${event.mode.toUpperCase()}`);
     void setGameMode(event.mode);
   }
-  if (event.kind === "raid-start") {
-    if (state?.raidChime !== false) {
-      playRaidChime();
-      noteLog("战局开始，已播放提示音");
-    } else noteLog("战局开始，提示音已关闭");
-  }
-  if (event.kind === "raid-end") noteLog("战局结束");
   if (event.kind === "quest" && (event.questKind === "started" || event.questKind === "failed" || event.questKind === "completed") && event.taskId) {
-    const label = event.questKind === "completed" ? "任务完成" : event.questKind === "failed" ? "任务失败" : "任务开始";
-    noteLog(`${label} ${event.taskId}`);
     void applyLoggedQuest(event.questKind, event.taskId).then(() => patchLoggedQuest(event.questKind as "started" | "failed" | "completed", event.taskId));
   }
 }
 
+function applyLogSnap(snap: LogLive) {
+  if (!snap.running) {
+    const kind = snap.phase === "matching_aborted" ? "matching_aborted" : "raid_exited";
+    noteLocalPhase({ kind });
+    noteGame({ inRaid: false, phase: kind });
+    syncLocalWatch();
+    if (onMapPicker()) refreshMapBoard();
+    return;
+  }
+  if (snap.phase || snap.slug) noteLocalPhase({ kind: snap.phase, mapId: snap.slug });
+  noteGame({ inRaid: snap.inRaid, slug: snap.slug, phase: snap.phase });
+  syncLocalWatch();
+  if (snap.mode) void onLogWatch({ kind: "mode", slug: "", mode: snap.mode, questKind: "", taskId: "" });
+  if (gameInRaid) openLiveRaidMap();
+  else if (onMapPicker()) refreshMapBoard();
+}
+
+async function pullLogSnap() {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const snap = await invoke<LogLive>("log_state").catch(() => null);
+    if (snap?.ready) {
+      applyLogSnap(snap);
+      return;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
+}
+
 async function boot() {
+  setLobbyRoomKeep((id) => Boolean(id && room.id === id && (room.slug || room.detail?.mapSlug || "").trim()));
+  window.addEventListener("zhange-drop-room", (event) => {
+    const id = (event as CustomEvent<{ id?: string }>).detail?.id || "";
+    if (id && room.id === id) clearRoomLocal();
+  });
   startPlayerSync();
   void invoke<ShotSettings>("shot_settings_get").then((saved) => rememberShotSettings(saved)).catch(() => undefined);
   if (bootOverlayShell()) return;
@@ -1686,14 +2128,7 @@ async function boot() {
   void listen<LogWatch>("log-watch", (event) => {
     void onLogWatch(event.payload);
   }).catch(() => undefined);
-  void invoke<LogWatch>("log_state").then((snap) => {
-    if (snap.slug) {
-      void onLogWatch({ kind: "map", slug: snap.slug, mode: "", questKind: "", taskId: "" });
-    } else if (snap.phase) {
-      void onLogWatch({ kind: "phase", slug: "", mode: "", questKind: "", taskId: "", phase: snap.phase, raidId: snap.raidId });
-    }
-    if (snap.mode) void onLogWatch({ kind: "mode", slug: "", mode: snap.mode, questKind: "", taskId: "" });
-  }).catch(() => undefined);
+  void pullLogSnap();
   const ok = await loggedIn();
   const current = path();
   bindHistory();
@@ -1740,12 +2175,6 @@ document.addEventListener("click", (event) => {
     }
     lastMapSlug = slug;
     go(`/主菜单/逃离塔科夫/实时地图/${slug}`);
-    return;
-  }
-  const previewRow = target.closest<HTMLElement>("[data-map-preview]");
-  if (previewRow?.dataset.mapPreview && previewRow.closest(".map-pick")) {
-    setMapPreview(previewRow.dataset.mapPreview);
-    if (onMapPicker()) render();
     return;
   }
   const catalogButton = target.closest<HTMLElement>("[data-catalog]");
@@ -1880,35 +2309,6 @@ document.addEventListener("click", (event) => {
   if (roomAction?.dataset.room) void onRoomAction(roomAction.dataset.room, roomAction);
 });
 
-async function saveRoomAccess(password: string) {
-  if (!room.id) return;
-  const listed = !password;
-  const path = `/guides/tarkov/raid-rooms/${room.id}/password`;
-  try {
-    let data: Record<string, unknown>;
-    try {
-      data = await invoke<Record<string, unknown>>("site_post", { path, body: { password, listed } });
-    } catch {
-      data = await invoke<Record<string, unknown>>("site_post", { path, body: { password } });
-    }
-    let detail = readDetail(data);
-    if (detail && listed && !detail.listed) {
-      const updated = await invoke<Record<string, unknown>>("site_put", {
-        path: `/guides/tarkov/raid-rooms/${room.id}`,
-        body: { listed: true },
-      }).catch(() => null);
-      const next = updated ? readDetail(updated) : null;
-      if (next) detail = next;
-    }
-    if (detail) applyDetail(detail, room.slug, password);
-    room.password = password;
-    paintRoomCard();
-  } catch (error) {
-    room.error = error instanceof Error ? error.message : "保存房间公开状态失败";
-    paintRoomCard();
-  }
-}
-
 async function onRoomAction(action: string, button: HTMLButtonElement) {
   if (action === "copy") {
     if (!room.id) return;
@@ -1916,20 +2316,6 @@ async function onRoomAction(action: string, button: HTMLButtonElement) {
     await navigator.clipboard.writeText(text).catch(() => undefined);
     button.textContent = "已复制";
     window.setTimeout(() => { button.textContent = "复制"; }, 1200);
-    return;
-  }
-  if (action === "private") {
-    document.querySelector("#room-settings")?.removeAttribute("hidden");
-    return;
-  }
-  if (action === "public") {
-    if (!room.id || !room.detail?.isHost) return;
-    button.disabled = true;
-    try {
-      await saveRoomAccess("");
-    } finally {
-      button.disabled = false;
-    }
     return;
   }
   if (action === "leave") {
@@ -1949,6 +2335,10 @@ async function joinRoom(code: string, password: string) {
     if (!detail) throw new Error("没有返回房间信息");
     roomSeq += 1;
     applyDetail(detail, detail.mapSlug || lastMapSlug, password);
+    if (gameInRaid && gameMapSlug) {
+      void switchRoomMap(gameMapSlug);
+      return;
+    }
     const slug = detail.mapSlug || lastMapSlug;
     if (slug) lastMapSlug = slug;
     go(slug ? `/主菜单/逃离塔科夫/实时地图/${slug}` : "/主菜单/逃离塔科夫/实时地图");
@@ -1961,16 +2351,6 @@ async function joinRoom(code: string, password: string) {
 
 document.addEventListener("keydown", (event) => {
   if (onOverlayKey(event)) return;
-  if (hotkeyCapture?.kind === "shot") {
-    event.preventDefault();
-    const named = event.code === "PrintScreen" || event.key === "PrintScreen" ? "PrintScreen" : "";
-    const key = named || (event.key.length === 1 ? event.key.toUpperCase() : event.key.toUpperCase().replace(/\s+/g, ""));
-    hotkeyCapture = null;
-    setShotCapture(false);
-    if (key !== "ESCAPE") void saveShotSettings({ hotkey: key });
-    else paintShotDialog();
-    return;
-  }
   if (!hotkeyCapture || !toolState) return;
   event.preventDefault();
   const key = event.key.length === 1 ? event.key.toUpperCase() : event.key.toUpperCase().replace(" ", "");
@@ -1995,6 +2375,11 @@ document.addEventListener("input", (event) => {
   if (onOverlayInput(event.target)) return;
   onMapTaskInput(event.target);
   const target = event.target;
+  if (target instanceof HTMLInputElement && target.id === "shot-every") {
+    const digits = shotIntervalText(target.value);
+    if (target.value !== digits) target.value = digits;
+    return;
+  }
   if (target instanceof HTMLInputElement && target.id.endsWith("-val") === false && target.id) {
     const text = document.querySelector(`#${target.id}-val`);
     if (text && target.type === "range") {
@@ -2023,7 +2408,9 @@ document.addEventListener("change", (event) => {
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "shot-every") {
-    void saveShotSettings({ autoSecs: Number(target.value) });
+    const autoSecs = shotIntervalSecs(target.value);
+    target.value = String(autoSecs);
+    void saveShotSettings({ autoSecs });
     return;
   }
   if (onOverlayChange(event.target)) {
@@ -2058,12 +2445,6 @@ document.addEventListener("submit", (event) => {
   event.preventDefault();
   if (form.id === "search-form") {
     void runSearch();
-    return;
-  }
-  if (form.id === "room-settings") {
-    const password = String(new FormData(form).get("password") || "");
-    if (!room.id || !room.detail?.isHost) return;
-    void saveRoomAccess(password).then(() => form.setAttribute("hidden", ""));
     return;
   }
   if (form.id === "tavern-search") {
@@ -2268,13 +2649,6 @@ document.addEventListener("click", (event) => {
   }
   if (target.closest("#shot-settings-close") || target.id === "shot-settings-modal") {
     closeShotSettings();
-    return;
-  }
-  if (target.closest("#shot-hotkey")) {
-    hotkeyCapture = { kind: "shot" };
-    setShotCapture(true);
-    const button = document.querySelector("#shot-hotkey");
-    if (button) button.textContent = "请按下截图按键";
     return;
   }
   if (target.closest("#detect-paths")) {

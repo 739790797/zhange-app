@@ -1,16 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { currentMapSlug, onLiveMapReady, setPlayerMarks, setPulseLines, setShotNote, type PlayerMark } from "./liveMap";
+import { sameMap } from "./mapNames";
 
 const FRESH_MS = 8 * 60_000;
 const PULSE_MS = 3_000;
 const AUTO_PHASE = new Set(["map_loading", "matching", "match_found", "raid_starting", "raid_started"]);
 const COLORS = ["#e8c36a", "#6cb6ff", "#6fbf4a", "#e08a2c", "#d44a4a", "#c77dff", "#4ab8b8", "#f0a3c2"];
-const aliases: Record<string, string> = {
-  lab: "the-lab",
-  streets: "streets-of-tarkov",
-  labyrinth: "the-labyrinth",
-  "factory-night": "night-factory",
-};
 
 type ShotState = {
   bound: boolean;
@@ -72,19 +67,16 @@ async function invoke<T>(command: string, args: Record<string, unknown> = {}): P
   return internals.invoke(command, args);
 }
 
+export function shotHotkeyLabel(key: string) {
+  if (!key || key === "PrintScreen") return "Print Screen";
+  if (key === "Mouse4") return "鼠标4";
+  if (key === "Mouse5") return "鼠标5";
+  return key;
+}
+
 function overlayWindow() {
   const view = new URLSearchParams(location.search).get("view");
-  return view === "overlay" || view === "raid";
-}
-
-function canon(slug: string) {
-  const key = slug.trim();
-  return aliases[key] || key;
-}
-
-function sameMap(left: string, right: string) {
-  if (!left || !right) return false;
-  return canon(left) === canon(right) || left === right;
+  return view === "overlay";
 }
 
 function fresh(at: number, now = Date.now()) {
@@ -319,6 +311,7 @@ function onRoom(payload: Record<string, unknown>) {
   if (event === "closed") {
     roomReady = false;
     sentSig = "";
+    phaseSig = "";
     paint();
     return;
   }
@@ -337,6 +330,7 @@ function onRoom(payload: Record<string, unknown>) {
     }
     paint();
     void publish();
+    void publishPhase();
     return;
   }
   if (event === "player_fix") {
@@ -344,6 +338,29 @@ function onRoom(payload: Record<string, unknown>) {
     if (!parsed) return;
     takeFix(parsed);
     paint();
+  }
+}
+
+async function pullLogPhase() {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const snap = await invoke<{ slug?: string; phase?: string; raidId?: string; running?: boolean; ready?: boolean }>("log_state").catch(() => null);
+    if (!snap?.ready) {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      continue;
+    }
+    if (snap.running === false) {
+      logSlug = "";
+      phaseKind = "";
+      paint();
+      return;
+    }
+    logSlug = snap.slug || "";
+    if (snap.phase) phaseKind = snap.phase;
+    if (phaseKind === "raid_exited" || phaseKind === "matching_aborted") logSlug = "";
+    if (snap.raidId) raidId = snap.raidId;
+    paint();
+    void publishPhase();
+    return;
   }
 }
 
@@ -377,16 +394,9 @@ export function startPlayerSync() {
     paint();
   }).catch(() => undefined);
   void invoke<ShotState>("shot_state").then((snap) => applyShot(snap, false)).catch(() => undefined);
-  void invoke<{ slug?: string; phase?: string; raidId?: string }>("log_state").then((snap) => {
-    logSlug = snap.slug || "";
-    if (snap.phase) phaseKind = snap.phase;
-    if (phaseKind === "raid_exited" || phaseKind === "matching_aborted") logSlug = "";
-    if (snap.raidId) raidId = snap.raidId;
-    paint();
-    void publishPhase();
-  }).catch(() => undefined);
-  const applySettings = (row: { hotkey?: string; syncEnabled?: boolean }) => {
-    hotkeyLabel = row.hotkey === "PrintScreen" || !row.hotkey ? "Print Screen" : row.hotkey;
+  void pullLogPhase();
+  const applySettings = (row: { hotkey?: string; gameHotkey?: string; hotkeyFromGame?: boolean; syncEnabled?: boolean }) => {
+    hotkeyLabel = row.hotkeyFromGame && row.gameHotkey ? row.gameHotkey : shotHotkeyLabel(row.hotkey || "");
     syncEnabled = row.syncEnabled !== false;
     paint();
   };

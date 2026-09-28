@@ -53,6 +53,8 @@ type MapLayer = {
   coordinateRotation?: number;
   bounds?: number[][];
   svgPath?: string;
+  svgLayer?: string;
+  svgBounds?: number[][];
   tilePath?: string;
   heightRange?: number[];
   normalizedName?: string;
@@ -172,9 +174,26 @@ let questPersonSeeded = false;
 let questGuide: ((taskId: string) => void) | null = null;
 let questToggle: ((taskId: string, objectiveId: string, done: boolean) => void) | null = null;
 const layers = new Map<string, L.LayerGroup>();
-const placed: { marker: L.Layer; point: Point }[] = [];
+const placed: { marker: L.Layer; point: Point; key: string }[] = [];
+const cullItems: { key: string; layer: L.Layer; bounds: L.LatLngBounds }[] = [];
+const CULL_PAD = 0.8;
+let cullQueued = false;
+/** 与网页端 MAP_OFF_LEVEL_OPACITY 相同：不在当前高度时压暗地面，而不是整张换成楼层图。 */
+const MAP_OFF_LEVEL_OPACITY = 0.4;
 let tileLayer: L.TileLayer | null = null;
-let svgLayer: L.ImageOverlay | null = null;
+const floorTiles = new Map<string, L.TileLayer>();
+let svgLayer: L.Layer | null = null;
+let svgRoot: SVGSVGElement | null = null;
+let svgLoad = 0;
+let rasterTimer = 0;
+let rasterToken = 0;
+let rasterUrl = "";
+let rasterBounds: L.LatLngBounds | null = null;
+let rasterZoom = Number.NaN;
+let rasterBroken = false;
+let mapMotion = false;
+const RASTER_PAD = 1;
+const RASTER_MAX = 4096;
 let activeConfig: MapLayer | null = null;
 
 export type PlayerMark = {
@@ -200,6 +219,8 @@ let playerHooked = false;
 let mapReady: (() => void) | null = null;
 let pulseLayer: L.LayerGroup | null = null;
 let pulsePending: PulseLine[] = [];
+const pulseEntries = new Map<string, { line: L.Polyline; opacity: number }>();
+const playerIconSig = new Map<string, string>();
 
 function findInteractive(slug: string): MapLayer | undefined {
   const key = aliases[slug] || slug;
@@ -231,13 +252,16 @@ function crsFor(layer: MapLayer): L.CRS {
   }) as L.CRS;
 }
 
-function boundsFor(layer: MapLayer) {
-  const bounds = layer.bounds;
-  if (!bounds || bounds.length < 2) return null;
-  const a = bounds[0];
-  const b = bounds[1];
+function latLngBounds(raw?: number[][]) {
+  if (!raw || raw.length < 2) return null;
+  const a = raw[0];
+  const b = raw[1];
   if (!a || !b) return null;
   return L.latLngBounds([a[1], a[0]], [b[1], b[0]]);
+}
+
+function boundsFor(layer: MapLayer) {
+  return latLngBounds(layer.bounds);
 }
 
 const ICON = "/tarkov/map-icons";
@@ -335,13 +359,11 @@ function placeAnchor(place: MapPlace): Point {
 
 function redrawPlaces() {
   if (!map) return;
-  const previous = layers.get("places");
-  if (previous) {
-    for (let index = placed.length - 1; index >= 0; index -= 1) {
-      if (previous.hasLayer(placed[index].marker)) placed.splice(index, 1);
-    }
-    previous.clearLayers();
+  untrackCull("places");
+  for (let index = placed.length - 1; index >= 0; index -= 1) {
+    if (placed[index].key === "places") placed.splice(index, 1);
   }
+  layers.get("places")?.clearLayers();
   for (const place of placeRows) {
     if (place.kind === "box" && place.x2 != null && place.z2 != null) {
       const selected = place.id === placeSelected;
@@ -385,7 +407,7 @@ function redrawPlaces() {
       });
     }
     add("places", marker, map, point);
-    if (place.id === placeSelected) marker.getElement()?.classList.add("on");
+    if (place.id === placeSelected) marker.on("add", () => marker.getElement()?.classList.add("on"));
   }
   applyFloorFade();
 }
@@ -616,15 +638,61 @@ function onPlaceMapClick(event: L.LeafletMouseEvent) {
   renderPlaceBar();
 }
 
+function layerBounds(layer: L.Layer, point: Point) {
+  if (layer instanceof L.Marker || layer instanceof L.CircleMarker) {
+    const at = layer.getLatLng();
+    return L.latLngBounds(at, at);
+  }
+  if (layer instanceof L.Polyline) {
+    const bounds = layer.getBounds();
+    if (bounds.isValid()) return bounds;
+  }
+  const at = L.latLng(point.z ?? 0, point.x ?? 0);
+  return L.latLngBounds(at, at);
+}
+
+function untrackCull(key: string) {
+  for (let index = cullItems.length - 1; index >= 0; index -= 1) {
+    if (cullItems[index].key === key) cullItems.splice(index, 1);
+  }
+}
+
+function trackCull(key: string, layer: L.Layer, bounds: L.LatLngBounds) {
+  cullItems.push({ key, layer, bounds });
+  scheduleCull();
+}
+
+function scheduleCull() {
+  if (!map || cullQueued) return;
+  cullQueued = true;
+  queueMicrotask(() => {
+    cullQueued = false;
+    syncCulling();
+  });
+}
+
+function syncCulling() {
+  if (!map || !(map as L.Map & { _loaded?: boolean })._loaded) return;
+  const view = map.getBounds().pad(CULL_PAD);
+  for (const item of cullItems) {
+    const group = layers.get(item.key);
+    if (!group) continue;
+    const show = map.hasLayer(group) && view.intersects(item.bounds);
+    const mounted = group.hasLayer(item.layer);
+    if (show && !mounted) item.layer.addTo(group);
+    else if (!show && mounted) group.removeLayer(item.layer);
+  }
+}
+
 function add(key: string, marker: L.Layer | null, host: L.Map, point: Point) {
-  if (!marker) return;
+  if (!marker || host !== map) return;
   let group = layers.get(key);
   if (!group) {
-    group = L.layerGroup().addTo(host);
+    group = L.layerGroup();
     layers.set(key, group);
   }
-  marker.addTo(group);
-  placed.push({ marker, point });
+  placed.push({ marker, point, key });
+  trackCull(key, marker, layerBounds(marker, point));
 }
 
 function applyFloorFade() {
@@ -654,36 +722,379 @@ async function invoke<T>(command: string, args: Record<string, unknown>): Promis
   return internals.invoke(command, args);
 }
 
-function showTile(path: string | undefined) {
-  if (!map || !activeConfig) return;
-  tileLayer?.remove();
-  svgLayer?.remove();
-  tileLayer = null;
-  svgLayer = null;
-  const bounds = boundsFor(activeConfig);
-  if (!bounds) return;
-  if (path) {
-    tileLayer = L.tileLayer(path, {
-      tileSize: activeConfig.tileSize || 256,
-      bounds,
-      maxZoom: Math.max(7, activeConfig.maxZoom ?? 5),
-      maxNativeZoom: activeConfig.maxZoom ?? 5,
-    }).addTo(map);
-    return;
-  }
-  if (activeConfig.svgPath) {
-    svgLayer = L.imageOverlay(activeConfig.svgPath, bounds).addTo(map);
+function mapBaseOffLevel(selectedFloorId: string, keepBaseOpaque: boolean) {
+  return Boolean(selectedFloorId) && !keepBaseOpaque;
+}
+
+function isSvgBaseFloorGroup(id: string, keepWith: string | undefined, baseId: string) {
+  if (!id || !baseId) return false;
+  return id === baseId || keepWith === baseId;
+}
+
+function setSvgFloor(root: SVGSVGElement | undefined, baseId: string, floorId: string, keepBaseOpaque: boolean) {
+  const inner = root?.children[0];
+  if (!root || !inner) return;
+  root.classList.toggle("off-level", mapBaseOffLevel(floorId, keepBaseOpaque));
+  for (const child of Array.from(inner.children)) {
+    if (child.nodeName.toLowerCase() !== "g") continue;
+    const group = child as SVGGElement;
+    if (!group.id) continue;
+    const base = isSvgBaseFloorGroup(group.id, group.dataset.keepWithGroup, baseId);
+    group.classList.toggle("base-layer", base);
+    group.classList.toggle("overlay-layer", !base);
+    group.classList.toggle("hidden-layer", base ? false : group.id !== floorId);
   }
 }
 
-function applyRememberedBase() {
+function svgFallbackUrl(svgPath: string) {
+  const file = svgPath.split("/").pop() || "";
+  if (!file) return svgPath;
+  return `https://raw.githubusercontent.com/the-hideout/tarkov-dev-svg-maps/refs/heads/main/${file}`;
+}
+
+async function loadSvgElement(svgPath: string) {
+  const urls = [svgPath, svgFallbackUrl(svgPath)];
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const text = await res.text();
+      const holder = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      holder.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      holder.innerHTML = text;
+      const inner = holder.children[0];
+      if (inner?.getAttribute("viewBox")) holder.setAttribute("viewBox", inner.getAttribute("viewBox") || "");
+      return holder;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("无法加载 SVG 地图");
+}
+
+function ensureFloorTiles() {
   if (!activeConfig) return;
-  if (prefs.style === "svg" && activeConfig.svgPath) {
-    showTile(undefined);
+  const bounds = boundsFor(activeConfig);
+  if (!bounds) return;
+  const tileSize = activeConfig.tileSize || 256;
+  const maxZoom = Math.max(7, activeConfig.maxZoom ?? 5);
+  const nativeZoom = activeConfig.maxZoom ?? 5;
+  const tileOptions = {
+    tileSize,
+    bounds,
+    maxZoom,
+    maxNativeZoom: nativeZoom,
+    updateWhenIdle: true,
+  };
+  if (!tileLayer && activeConfig.tilePath) {
+    tileLayer = L.tileLayer(activeConfig.tilePath, { ...tileOptions, zIndex: 1 });
+  }
+  for (const floor of activeConfig.layers || []) {
+    if (!floor.tilePath || floorTiles.has(floor.name)) continue;
+    floorTiles.set(floor.name, L.tileLayer(floor.tilePath, { ...tileOptions, zIndex: 2 }));
+  }
+}
+
+function showTiles(keepBaseOpaque: boolean) {
+  if (!map || !activeConfig) return;
+  window.clearTimeout(rasterTimer);
+  rasterToken += 1;
+  svgLayer?.remove();
+  svgLayer = null;
+  releaseRasterUrl();
+  invalidateRaster();
+  ensureFloorTiles();
+  if (tileLayer) {
+    tileLayer.addTo(map);
+    tileLayer.setOpacity(mapBaseOffLevel(prefs.floor, keepBaseOpaque) ? MAP_OFF_LEVEL_OPACITY : 1);
+  }
+  for (const [name, tile] of floorTiles) {
+    if (name === prefs.floor) tile.addTo(map);
+    else tile.remove();
+  }
+}
+
+type ViewBox = { x: number; y: number; width: number; height: number };
+
+function usingSvgBase() {
+  if (!svgRoot || rasterBroken || !activeConfig?.svgPath) return false;
+  return prefs.style === "svg" || !activeConfig.tilePath;
+}
+
+function releaseRasterUrl() {
+  if (!rasterUrl) return;
+  URL.revokeObjectURL(rasterUrl);
+  rasterUrl = "";
+}
+
+function invalidateRaster() {
+  rasterBounds = null;
+  rasterZoom = Number.NaN;
+}
+
+function boundsClose(a: L.LatLngBounds, b: L.LatLngBounds) {
+  return Math.abs(a.getSouth() - b.getSouth()) < 1e-3
+    && Math.abs(a.getNorth() - b.getNorth()) < 1e-3
+    && Math.abs(a.getWest() - b.getWest()) < 1e-3
+    && Math.abs(a.getEast() - b.getEast()) < 1e-3;
+}
+
+function intersectBounds(view: L.LatLngBounds, limit: L.LatLngBounds) {
+  const south = Math.max(view.getSouth(), limit.getSouth());
+  const north = Math.min(view.getNorth(), limit.getNorth());
+  const west = Math.max(view.getWest(), limit.getWest());
+  const east = Math.min(view.getEast(), limit.getEast());
+  if (south > north || west > east) return null;
+  return L.latLngBounds([south, west], [north, east]);
+}
+
+function paddedViewBounds() {
+  if (!map) return null;
+  const size = map.getSize();
+  if (size.x < 2 || size.y < 2) return null;
+  const nw = map.containerPointToLatLng(L.point(-size.x * RASTER_PAD, -size.y * RASTER_PAD));
+  const se = map.containerPointToLatLng(L.point(size.x * (1 + RASTER_PAD), size.y * (1 + RASTER_PAD)));
+  return L.latLngBounds(nw, se);
+}
+
+function readViewBox(svg: SVGSVGElement): ViewBox | null {
+  const box = svg.viewBox?.baseVal;
+  if (box && box.width > 0 && box.height > 0) return { x: box.x, y: box.y, width: box.width, height: box.height };
+  const parts = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part)) || parts[2] <= 0 || parts[3] <= 0) return null;
+  return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+}
+
+function svgGraphic(root: SVGSVGElement) {
+  const inner = root.children[0];
+  const node = inner instanceof SVGSVGElement ? inner : root;
+  const box = readViewBox(node) || (node !== root ? readViewBox(root) : null);
+  return box ? { node, box } : null;
+}
+
+function bakeSvgStyles(svg: SVGSVGElement, offLevel: boolean) {
+  for (const node of svg.querySelectorAll("g.hidden-layer")) node.setAttribute("display", "none");
+  if (!offLevel) return;
+  for (const node of svg.querySelectorAll("g.base-layer")) node.setAttribute("opacity", String(MAP_OFF_LEVEL_OPACITY));
+}
+
+function loadImage(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("地图栅格化失败"));
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    const fail = () => reject(new Error("地图栅格化失败"));
+    try {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+        try {
+          canvas.toBlob((png) => (png ? resolve(png) : fail()), "image/png");
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error("地图栅格化失败"));
+        }
+      }, "image/webp", 0.92);
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error("地图栅格化失败"));
+    }
+  });
+}
+
+async function drawSvgSlice(graphic: SVGSVGElement, box: ViewBox, full: L.LatLngBounds, target: L.LatLngBounds, offLevel: boolean) {
+  if (!map) return null;
+  const fullNw = map.latLngToLayerPoint(full.getNorthWest());
+  const fullSe = map.latLngToLayerPoint(full.getSouthEast());
+  const originX = Math.min(fullNw.x, fullSe.x);
+  const originY = Math.min(fullNw.y, fullSe.y);
+  const fullW = Math.abs(fullSe.x - fullNw.x);
+  const fullH = Math.abs(fullSe.y - fullNw.y);
+  const viewNw = map.latLngToLayerPoint(target.getNorthWest());
+  const viewSe = map.latLngToLayerPoint(target.getSouthEast());
+  const viewX = Math.min(viewNw.x, viewSe.x);
+  const viewY = Math.min(viewNw.y, viewSe.y);
+  const viewW = Math.abs(viewSe.x - viewNw.x);
+  const viewH = Math.abs(viewSe.y - viewNw.y);
+  if (fullW < 1 || fullH < 1 || viewW < 1 || viewH < 1) return null;
+  const crop = {
+    x: box.x + ((viewX - originX) / fullW) * box.width,
+    y: box.y + ((viewY - originY) / fullH) * box.height,
+    width: (viewW / fullW) * box.width,
+    height: (viewH / fullH) * box.height,
+  };
+  if (crop.width <= 0 || crop.height <= 0) return null;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const limit = Math.min(1, RASTER_MAX / Math.ceil(viewW * dpr), RASTER_MAX / Math.ceil(viewH * dpr));
+  const width = Math.max(1, Math.floor(viewW * dpr * limit));
+  const height = Math.max(1, Math.floor(viewH * dpr * limit));
+  const clone = graphic.cloneNode(true) as SVGSVGElement;
+  bakeSvgStyles(clone, offLevel);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("viewBox", `${crop.x} ${crop.y} ${crop.width} ${crop.height}`);
+  clone.setAttribute("width", String(width));
+  clone.setAttribute("height", String(height));
+  clone.setAttribute("preserveAspectRatio", "none");
+  const xml = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = await loadImage(url);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(image, 0, 0, width, height);
+    return canvas;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function useVectorSvg(bounds: L.LatLngBounds) {
+  if (!map || !svgRoot) return;
+  if (svgLayer && map.hasLayer(svgLayer) && svgLayer instanceof L.SVGOverlay) return;
+  svgLayer?.remove();
+  releaseRasterUrl();
+  invalidateRaster();
+  svgLayer = L.svgOverlay(svgRoot, bounds, { interactive: false }).addTo(map);
+}
+
+function mountRaster(url: string, bounds: L.LatLngBounds, zoom: number, token: number) {
+  if (!map || token !== rasterToken) {
+    URL.revokeObjectURL(url);
     return;
   }
-  const floor = activeConfig.layers?.find((item) => item.name === prefs.floor && item.tilePath);
-  showTile(floor?.tilePath || activeConfig.tilePath);
+  const overlay = L.imageOverlay(url, bounds, { interactive: false, pane: "tilePane", zIndex: 1 });
+  const previous = svgLayer;
+  const previousUrl = rasterUrl;
+  let settled = false;
+  const commit = () => {
+    if (settled) return;
+    settled = true;
+    if (token !== rasterToken || !map) {
+      overlay.remove();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    if (previous && previous !== overlay) previous.remove();
+    if (previousUrl && previousUrl !== url) URL.revokeObjectURL(previousUrl);
+    svgLayer = overlay;
+    rasterUrl = url;
+    rasterBounds = bounds;
+    rasterZoom = zoom;
+  };
+  overlay.once("load", commit);
+  overlay.once("error", () => {
+    if (settled) return;
+    settled = true;
+    overlay.remove();
+    URL.revokeObjectURL(url);
+    if (token !== rasterToken || !map || !activeConfig) return;
+    rasterBroken = true;
+    const full = latLngBounds(activeConfig.svgBounds) || boundsFor(activeConfig);
+    if (full) useVectorSvg(full);
+  });
+  overlay.addTo(map);
+}
+
+function scheduleRaster() {
+  if (!usingSvgBase()) return;
+  window.clearTimeout(rasterTimer);
+  rasterTimer = window.setTimeout(() => { void rasterizeBase(); }, 80);
+}
+
+function hookMapMotion() {
+  if (!map || mapMotion) return;
+  mapMotion = true;
+  map.on("moveend", () => {
+    scheduleCull();
+    scheduleRaster();
+  });
+}
+
+async function rasterizeBase() {
+  const config = activeConfig;
+  if (!map || !svgRoot || !config || !usingSvgBase()) return;
+  const full = latLngBounds(config.svgBounds) || boundsFor(config);
+  const padded = paddedViewBounds();
+  if (!full || !padded) return;
+  const target = intersectBounds(padded, full) ?? full;
+  const zoom = map.getZoom();
+  const view = map.getBounds();
+  if (rasterBounds && rasterZoom === zoom && (rasterBounds.contains(view) || boundsClose(rasterBounds, target))) return;
+  const graphic = svgGraphic(svgRoot);
+  if (!graphic) {
+    rasterBroken = true;
+    useVectorSvg(full);
+    return;
+  }
+  const token = ++rasterToken;
+  const offLevel = svgRoot.classList.contains("off-level");
+  try {
+    const canvas = await drawSvgSlice(graphic.node, graphic.box, full, target, offLevel);
+    if (token !== rasterToken || !map || !usingSvgBase()) return;
+    if (!canvas) throw new Error("地图栅格化失败");
+    const blob = await canvasToBlob(canvas);
+    if (token !== rasterToken || !map || !usingSvgBase()) return;
+    mountRaster(URL.createObjectURL(blob), target, zoom, token);
+  } catch {
+    if (token !== rasterToken || !map || !usingSvgBase()) return;
+    rasterBroken = true;
+    useVectorSvg(full);
+  }
+}
+
+async function showSvg(floorId: string, keepBaseOpaque: boolean) {
+  if (!map || !activeConfig?.svgPath) return;
+  const bounds = latLngBounds(activeConfig.svgBounds) || boundsFor(activeConfig);
+  if (!bounds) return;
+  const generation = ++svgLoad;
+  rasterToken += 1;
+  const path = activeConfig.svgPath;
+  const baseId = activeConfig.svgLayer || "";
+  tileLayer?.remove();
+  for (const tile of floorTiles.values()) tile.remove();
+  if (!svgRoot) {
+    try {
+      svgRoot = await loadSvgElement(path);
+    } catch {
+      if (generation !== svgLoad || !map) return;
+      svgLayer?.remove();
+      svgLayer = L.imageOverlay(path, bounds, { interactive: false, pane: "tilePane" }).addTo(map);
+      return;
+    }
+    if (generation !== svgLoad || !map) return;
+  }
+  if (!svgRoot || generation !== svgLoad) return;
+  setSvgFloor(svgRoot, baseId, floorId, keepBaseOpaque);
+  if (rasterBroken) {
+    useVectorSvg(bounds);
+    return;
+  }
+  invalidateRaster();
+  scheduleRaster();
+}
+
+function applyRememberedBase() {
+  if (!map || !activeConfig) return;
+  const floorLayer = activeConfig.layers?.find((item) => item.name === prefs.floor);
+  const keepBaseOpaque = floorLayer?.show === true;
+  const useSvg = Boolean(activeConfig.svgPath) && (prefs.style === "svg" || !activeConfig.tilePath);
+  if (useSvg) {
+    void showSvg(floorLayer?.svgLayer || "", keepBaseOpaque);
+    return;
+  }
+  svgLoad += 1;
+  showTiles(keepBaseOpaque);
 }
 
 export function setMapStyle(style: "tile" | "svg") {
@@ -694,7 +1105,6 @@ export function setMapStyle(style: "tile" | "svg") {
 
 export function setMapFloor(name: string) {
   setAccountFloor(mapFilterKey(), name);
-  setAccountStyle("tile");
   savePrefs();
   applyRememberedBase();
   applyFloorFade();
@@ -715,10 +1125,12 @@ function applyLayer(key: string) {
   else group.remove();
   if (key === "tasks") {
     const labels = layers.get("quest-labels");
-    if (!labels) return;
-    if (layerOn(key)) labels.addTo(map);
-    else labels.remove();
+    if (labels) {
+      if (layerOn(key)) labels.addTo(map);
+      else labels.remove();
+    }
   }
+  scheduleCull();
 }
 
 export function setLayerVisible(key: string, on: boolean) {
@@ -782,20 +1194,46 @@ export function setPlayerMarks(marks: PlayerMark[], follow: false | "fly" | "pan
   drawPlayers(follow);
 }
 
-export function setPulseLines(lines: PulseLine[]) {
-  pulsePending = lines;
+function pulseKey(line: PulseLine) {
+  return `${line.x1}:${line.z1}:${line.x2}:${line.z2}:${line.color}`;
+}
+
+function applyPulses() {
   if (!map) return;
   if (!pulseLayer) pulseLayer = L.layerGroup().addTo(map);
-  pulseLayer.clearLayers();
-  for (const line of lines) {
+  const next = new Map<string, PulseLine>();
+  for (const line of pulsePending) {
     if (line.opacity <= 0) continue;
-    L.polyline([[line.z1, line.x1], [line.z2, line.x2]], {
+    next.set(pulseKey(line), line);
+  }
+  for (const [key, entry] of pulseEntries) {
+    const line = next.get(key);
+    if (!line) {
+      pulseLayer.removeLayer(entry.line);
+      pulseEntries.delete(key);
+      continue;
+    }
+    if (Math.abs(entry.opacity - line.opacity) > 0.015) {
+      entry.line.setStyle({ opacity: line.opacity });
+      entry.opacity = line.opacity;
+    }
+  }
+  for (const [key, line] of next) {
+    if (pulseEntries.has(key)) continue;
+    const drawn = L.polyline([[line.z1, line.x1], [line.z2, line.x2]], {
       color: line.color,
       weight: 2,
       opacity: line.opacity,
       interactive: false,
     }).addTo(pulseLayer);
+    pulseEntries.set(key, { line: drawn, opacity: line.opacity });
   }
+}
+
+export function setPulseLines(lines: PulseLine[]) {
+  pulsePending = lines;
+  if (!map || userDragging) return;
+  applyPulses();
 }
 
 function hookPlayers() {
@@ -803,7 +1241,10 @@ function hookPlayers() {
   playerHooked = true;
   map.on("zoomend", () => drawPlayers(false));
   map.on("dragstart", () => { userDragging = true; });
-  map.on("dragend", () => { userDragging = false; });
+  map.on("dragend", () => {
+    userDragging = false;
+    applyPulses();
+  });
 }
 
 function headingDeg(x: number, z: number, yaw: number) {
@@ -830,6 +1271,7 @@ function drawPlayers(follow: false | "fly" | "pan") {
     if (keep.has(key)) continue;
     playerGroup.removeLayer(marker);
     playerLayers.delete(key);
+    playerIconSig.delete(key);
   }
   const bands = markerFloorBands(activeConfig);
   for (const mark of playerMarks) {
@@ -840,21 +1282,28 @@ function drawPlayers(follow: false | "fly" | "pan") {
       : `<span class="player-arrow" style="transform:rotate(${yaw}deg)"></span>`;
     const name = escPlayer(mark.name.trim());
     const label = name ? `<span class="player-name">${name}</span>` : "";
-    const icon = L.divIcon({
-      className: "player-icon",
-      html: `<span class="player-mark" style="color:${escPlayer(mark.color)};opacity:${view.opacity}"><span class="player-glow"></span>${pip}${label}</span>`,
-      iconSize: [32, name ? 44 : 32],
-      iconAnchor: [16, 16],
-    });
+    const html = `<span class="player-mark" style="color:${escPlayer(mark.color)};opacity:${view.opacity}"><span class="player-glow"></span>${pip}${label}</span>`;
+    const tall = Boolean(name);
+    const sig = `${html}\0${tall ? 1 : 0}`;
     let marker = playerLayers.get(mark.key);
     if (!marker) {
-      marker = L.marker([mark.z, mark.x], { icon, interactive: false, keyboard: false, zIndexOffset: mark.self ? 920 : 900 });
+      marker = L.marker([mark.z, mark.x], {
+        icon: L.divIcon({ className: "player-icon", html, iconSize: [32, tall ? 44 : 32], iconAnchor: [16, 16] }),
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: mark.self ? 920 : 900,
+      });
       marker.addTo(playerGroup);
       playerLayers.set(mark.key, marker);
+      playerIconSig.set(mark.key, sig);
     } else {
-      marker.setLatLng([mark.z, mark.x]);
-      marker.setIcon(icon);
-      marker.setZIndexOffset(mark.self ? 920 : 900);
+      const at = L.latLng(mark.z, mark.x);
+      const current = marker.getLatLng();
+      if (current.lat !== at.lat || current.lng !== at.lng) marker.setLatLng(at);
+      if (playerIconSig.get(mark.key) !== sig) {
+        marker.setIcon(L.divIcon({ className: "player-icon", html, iconSize: [32, tall ? 44 : 32], iconAnchor: [16, 16] }));
+        playerIconSig.set(mark.key, sig);
+      }
     }
   }
   setPulseLines(pulsePending);
@@ -882,13 +1331,23 @@ export function invalidateLiveMap() {
 export function destroyLiveMap() {
   token += 1;
   questToken += 1;
+  rasterToken += 1;
   window.clearTimeout(labelTimer);
+  window.clearTimeout(rasterTimer);
   clearDraftRect();
   unbindBoxDraw();
   map?.remove();
   map = null;
+  releaseRasterUrl();
+  invalidateRaster();
+  rasterBroken = false;
+  mapMotion = false;
+  cullItems.length = 0;
+  cullQueued = false;
   playerGroup = null;
   pulseLayer = null;
+  pulseEntries.clear();
+  playerIconSig.clear();
   playerLayers.clear();
   playerHooked = false;
   userDragging = false;
@@ -902,8 +1361,11 @@ export function destroyLiveMap() {
   placeNote = "";
   draftPoint = null;
   draftBox = null;
+  svgLoad += 1;
   tileLayer = null;
+  floorTiles.clear();
   svgLayer = null;
+  svgRoot = null;
   activeConfig = null;
   filterConfig = null;
   filterDetail = null;
@@ -927,12 +1389,13 @@ export async function mountLiveMap(slug: string, fit = true) {
   const bounds = boundsFor(config)!;
   map = L.map(host, {
     crs: crsFor(config),
-    zoomSnap: 0.1,
+    zoomSnap: 0.5,
     attributionControl: false,
     zoomControl: false,
     minZoom: config.minZoom ?? 1,
     maxZoom: Math.max(7, config.maxZoom ?? 5),
   });
+  hookMapMotion();
   L.control.zoom({ position: "bottomright" }).addTo(map);
   map.on("click", onPlaceMapClick);
   bindBoxDraw();
@@ -1607,6 +2070,7 @@ function bindQuestBubble(layer: L.Layer, row: QuestOverlay) {
 function paintQuestShapes() {
   const group = layers.get("tasks");
   if (!group) return;
+  untrackCull("tasks");
   group.clearLayers();
   for (const row of displayedQuests) {
     const at = questAt(row);
@@ -1625,7 +2089,7 @@ function paintQuestShapes() {
         className: "quest-hit",
       });
       bindQuestBubble(polygon, row);
-      polygon.addTo(group);
+      trackCull("tasks", polygon, polygon.getBounds());
     }
     for (const point of row.points) {
       const marker = L.circleMarker([point.z, point.x], {
@@ -1639,7 +2103,8 @@ function paintQuestShapes() {
         className: "quest-hit",
       });
       bindQuestBubble(marker, row);
-      marker.addTo(group);
+      const at = marker.getLatLng();
+      trackCull("tasks", marker, L.latLngBounds(at, at));
     }
   }
 }
@@ -1647,6 +2112,7 @@ function paintQuestShapes() {
 function paintQuestLabels() {
   const group = layers.get("quest-labels");
   if (!group || !map || !(map as L.Map & { _loaded?: boolean })._loaded) return;
+  untrackCull("quest-labels");
   group.clearLayers();
   const labels = clusterQuestLabels(displayedQuests, (point) => {
     const projected = map!.latLngToLayerPoint(L.latLng(point.z, point.x));
@@ -1678,7 +2144,8 @@ function paintQuestLabels() {
           else delete row.dataset.on;
         }
       });
-      marker.addTo(group);
+      const anchor = marker.getLatLng();
+      trackCull("quest-labels", marker, L.latLngBounds(anchor, anchor));
     });
   });
 }

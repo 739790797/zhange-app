@@ -90,7 +90,7 @@ async fn connect(
     let url = format!("wss://zhange.space/api/guides/tarkov/raid-rooms/{public_id}/ws");
     let (socket, _) = connect_async(url).await.map_err(|err| err.to_string())?;
     let (mut write, mut read) = socket.split();
-    let auth = json!({ "event": "auth", "token": token }).to_string();
+    let auth = json!({ "event": "auth", "token": token, "client": "desktop" }).to_string();
     write.send(Message::Text(auth.into())).await.map_err(|err| err.to_string())?;
     let mut ping = tokio::time::interval(Duration::from_secs(25));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

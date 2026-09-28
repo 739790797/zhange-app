@@ -47,8 +47,8 @@ fn main() {
             "overlay_set_guard",
             "overlay_set_hotkey_live",
             "overlay_return_focus",
-            "raid_status",
             "log_state",
+            "log_tails",
         ]),
     );
     if let Err(error) = tauri_build::try_build(attrs) {
