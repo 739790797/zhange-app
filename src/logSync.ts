@@ -1,3 +1,6 @@
+import { fadeIn, fadeOut } from "./motion";
+import { noteTaskSynced, reloadTaskProgress } from "./taskFlow";
+
 type Session = { folder: string; startedAt: string };
 type Bundle = { folder: string; files: { name: string; text: string }[] };
 type Kind = "started" | "failed" | "completed";
@@ -142,13 +145,13 @@ export function logSyncBusy() {
 export function openLogSync() {
   const box = document.querySelector<HTMLElement>("#log-sync-box");
   if (!box) return;
-  box.hidden = false;
+  fadeIn(box);
   note("本机解析日志，只把任务状态回填到账号，不会上传原文。");
 }
 
 export function closeLogSync() {
   const box = document.querySelector<HTMLElement>("#log-sync-box");
-  if (box) box.hidden = true;
+  if (box) void fadeOut(box);
 }
 
 export function pickLogSyncRange(next: string) {
@@ -248,7 +251,9 @@ export async function runLogSync() {
     });
     const sign = (value: number) => `${value >= 0 ? "+" : ""}${value}`;
     note(`${cancel ? "已取消。" : ""}已解析 ${cancel ? "部分" : String(oldest.length)} 段日志，任务事件 ${events.length} 条。完成 ${sign(done.size - before.done)}，进行中 ${sign(started.size - before.started)}，失败 ${sign(failed.size - before.failed)}。`);
+    noteTaskSynced();
     closeLogSync();
+    await reloadTaskProgress();
   } catch (error) {
     note(error instanceof Error ? error.message : "同步日志失败");
   } finally {

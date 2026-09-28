@@ -1,7 +1,9 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { destroyLiveMap, fitLiveMap, liveMapCamera, mountLiveMap, replacePrefs, setLiveMapCamera, snapshotPrefs, watchLiveMapCamera, type FilterPrefs } from "./liveMap";
+import { adoptAccount, type AccountMapFilters } from "./mapFilterAccount";
+import { destroyLiveMap, fitLiveMap, liveMapCamera, mountLiveMap, replacePrefs, setLiveMapCamera, snapshotAccount, snapshotPrefs, watchLiveMapCamera, type FilterPrefs } from "./liveMap";
+import { fadeIn, fadeOut } from "./motion";
 
 export type OverlayState = {
   autoFocus: boolean;
@@ -33,7 +35,7 @@ export type RaidStatus = {
   location: string;
 };
 
-type SyncPayload = { slug: string; prefs: FilterPrefs };
+type SyncPayload = { slug: string; prefs: FilterPrefs; account?: AccountMapFilters };
 
 const VIEW_KEY = "zhange.overlay.views";
 let overlayState: OverlayState | null = null;
@@ -56,6 +58,7 @@ export function overlayCardHtml() {
     <section class="overlay-card" id="overlay-card">
       <button type="button" id="map-summary">准备内容总结</button>
       <button type="button" id="overlay-settings">地图覆盖层设置</button>
+      <button type="button" id="shot-settings">截图设置</button>
     </section>`;
 }
 
@@ -91,7 +94,7 @@ export function setOverlayHotkeyLive(live: boolean) {
 export async function publishOverlayMap(slug: string) {
   if (!slug || overlayView()) return;
   await invoke("overlay_note_map", { slug }).catch(() => undefined);
-  await emit("overlay-sync", { slug, prefs: snapshotPrefs() } satisfies SyncPayload);
+  await emit("overlay-sync", { slug, prefs: snapshotPrefs(), account: snapshotAccount() } satisfies SyncPayload);
 }
 
 export function bootOverlayShell() {
@@ -130,7 +133,7 @@ export async function openOverlaySettings(point?: { x: number; y: number }) {
   if (!modal) return;
   overlayState = await invoke<OverlayState>("overlay_get");
   paintOverlayDialog(overlayState);
-  modal.hidden = false;
+  fadeIn(modal);
   if (!point) return;
   const menu = modal.querySelector<HTMLElement>(".overlay-menu");
   if (!menu) return;
@@ -144,7 +147,7 @@ export async function openOverlaySettings(point?: { x: number; y: number }) {
 
 export function closeOverlaySettings() {
   const modal = document.querySelector<HTMLElement>("#overlay-settings-modal");
-  if (modal) modal.hidden = true;
+  if (modal) void fadeOut(modal);
   if (recording) {
     recording = false;
     void invoke("overlay_set_guard", { capturing: false, typing: typingActive() });
@@ -370,7 +373,8 @@ async function bootMapOverlay() {
     if (modal && !modal.hasAttribute("hidden")) paintOverlayDialog(event.payload);
   });
   void listen<SyncPayload>("overlay-sync", (event) => {
-    void showMap(event.payload.slug, event.payload.prefs);
+    if (event.payload.account) adoptAccount(event.payload.account);
+    void showMap(event.payload.slug, event.payload.account ? null : event.payload.prefs);
   });
   if (overlayState?.mapSlug) await showMap(overlayState.mapSlug, null);
 }

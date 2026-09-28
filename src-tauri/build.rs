@@ -1,6 +1,13 @@
 fn main() {
-    let windows = tauri_build::WindowsAttributes::new()
-        .app_manifest(include_str!("windows-app.manifest.xml"));
+    // cargo run 用 CreateProcess 拉起进程，无法弹出 UAC，清单若要求管理员会直接失败（os error 740）。
+    // 调试构建改为 asInvoker；正式包仍使用清单里的 requireAdministrator。
+    let manifest = include_str!("windows-app.manifest.xml");
+    let manifest = if std::env::var("PROFILE").as_deref() == Ok("release") {
+        manifest.to_string()
+    } else {
+        manifest.replace("requireAdministrator", "asInvoker")
+    };
+    let windows = tauri_build::WindowsAttributes::new().app_manifest(manifest);
     let attrs = tauri_build::Attributes::new()
         .windows_attributes(windows)
         .app_manifest(
@@ -20,6 +27,7 @@ fn main() {
             "shot_state",
             "shot_settings_get",
             "shot_settings_set",
+            "shot_capture_set",
             "app_usage",
             "paths_get",
             "paths_set",

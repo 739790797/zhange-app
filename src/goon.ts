@@ -1,3 +1,5 @@
+import { mapTitle } from "./mapNames";
+
 type Goon = { mapSlug: string; seenAt: string };
 
 let goon: Goon | null = null;
@@ -23,10 +25,20 @@ function ago(value: string) {
   return `${Math.floor(hours / 24)}天前`;
 }
 
+export function goonSlug() {
+  return goon?.mapSlug || "";
+}
+
+export function goonHint() {
+  if (!goon?.mapSlug) return "";
+  const when = ago(goon.seenAt);
+  return when ? `三狗出没（${when}上报）` : "";
+}
+
 export function goonText(mapName: string) {
   if (!goon?.mapSlug) return "";
   const when = ago(goon.seenAt);
-  const place = mapName || goon.mapSlug;
+  const place = mapTitle(goon.mapSlug, mapName);
   return when ? `三狗出没 · ${place}（${when}上报）` : `三狗出没 · ${place}`;
 }
 

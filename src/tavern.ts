@@ -1,3 +1,5 @@
+import { spin } from "./spinner";
+
 const BASE = "/主菜单/战鸽酒馆";
 const SITE = "https://zhange.space";
 const PAGE_SIZE = 10;
@@ -155,14 +157,14 @@ export function tavernListHtml() {
         </form>
       </header>
       <div class="tavern-board">
-        <div class="tavern-feed" id="tavern-feed"><p class="tavern-note">正在读取文章…</p></div>
+        <div class="tavern-feed" id="tavern-feed">${spin("正在读取文章")}</div>
         <aside class="tavern-side" id="tavern-cats"></aside>
       </div>
     </section>`;
 }
 
 export function tavernArticleHtml() {
-  return `<article class="tavern-read" id="tavern-page"><p class="tavern-note">正在读取文章…</p></article>`;
+  return `<article class="tavern-read" id="tavern-page">${spin("正在读取文章")}</article>`;
 }
 
 function cardHtml(item: ArticleCard) {

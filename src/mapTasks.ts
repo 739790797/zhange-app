@@ -1,4 +1,7 @@
 import { colorForTaskId, colorForUserId, questColor } from "./questOverlay";
+import { mapTitle } from "./mapNames";
+import { fadeIn, fadeOut } from "./motion";
+import { isPending, spin } from "./spinner";
 
 type MapObjective = {
   id: string;
@@ -167,7 +170,7 @@ function readObjectives(raw: unknown, mapSlug: string, _taskOnMap: boolean): Map
     const slugs = [...maps, ...zonePlaces, ...locations].map(placeSlug).filter(Boolean);
     const located = maps.length > 0 || zonePlaces.length > 0 || locations.length > 0;
     const onMap = !located || slugs.some((item) => keys.has(item));
-    const mapName = maps.map(named).filter(Boolean).join("、");
+    const mapName = maps.map((item) => mapTitle(placeSlug(item), named(item), "")).filter(Boolean).join("、");
     return [{ id, text, mapName, onMap }];
   });
 }
@@ -264,7 +267,7 @@ function paint() {
         <button type="button" data-map-task-scope="all" class="${scope === "all" ? "on" : ""}">全部</button>
       </div>
     </div>
-    ${tasks.length ? "" : `<p>${esc(note)}</p>`}
+    ${tasks.length ? "" : (isPending(note) ? spin(note, true) : `<p>${esc(note)}</p>`)}
     ${blocks}
     ${tasks.length && !visible.length ? `<p>没有匹配的任务。</p>` : ""}`;
   const panel = host.closest("#task-panel");
@@ -298,7 +301,7 @@ function hideFloat() {
   hoverId = "";
   hoverAnchor = null;
   const node = document.querySelector<HTMLElement>("#map-task-float");
-  if (node) node.hidden = true;
+  if (node) void fadeOut(node);
 }
 
 async function ensureDetail(task: MapTask) {
@@ -344,7 +347,7 @@ function showFloat(task: MapTask, anchor: HTMLElement, fetch = true) {
   const icon = traderIcon(traderSlugOf(task.traderSlug, task.trader));
   const ready = detailReady.has(task.id);
   const body = !ready
-    ? `<p class="map-task-float-loading">${detailFailed.has(task.id) ? "加载失败" : "正在加载…"}</p>`
+    ? (detailFailed.has(task.id) ? `<p class="map-task-float-loading">加载失败</p>` : spin("正在加载", true))
     : `${here.length ? `<div class="map-task-float-here">${here.map((item) => line(item, true)).join("")}</div>` : ""}
     ${[...groups.entries()].map(([name, items]) => `<div class="map-task-float-else"><p>${esc(name)}</p>${items.map((item) => line(item, false)).join("")}</div>`).join("")}
     ${!task.objectives.length && !task.fails.length ? `<p class="map-task-float-empty">无目标数据</p>` : ""}
@@ -356,7 +359,7 @@ function showFloat(task: MapTask, anchor: HTMLElement, fetch = true) {
       <strong>${esc(task.name)}</strong>
     </div>
     ${body}`;
-  node.hidden = false;
+  fadeIn(node);
   const row = anchor.getBoundingClientRect();
   const panel = document.querySelector("#task-panel")?.getBoundingClientRect();
   const edge = panel?.left ?? row.left;
@@ -536,9 +539,15 @@ function guideTasks() {
 function paintGuide() {
   let node = document.querySelector<HTMLElement>("#map-guide");
   if (!guideId) {
-    node?.remove();
+    if (node) {
+      const target = node;
+      void fadeOut(target).then(() => {
+        if (!guideId) target.remove();
+      });
+    }
     return;
   }
+  const fresh = !node || node.classList.contains("is-fade-out");
   if (!node) {
     node = document.createElement("div");
     node.id = "map-guide";
@@ -562,7 +571,7 @@ function paintGuide() {
     ? `<div class="map-guide-progress"><p>任务进度</p>${active.objectives.length ? active.objectives.map((item) => {
         const checked = statusOf(active) === "done" || objectiveDone(active.id, item.id);
         return `<label class="map-task-obj${checked ? " done" : ""}"><input type="checkbox" data-map-obj="${esc(item.id)}" data-map-obj-task="${esc(active.id)}" ${checked ? "checked" : ""} /><span>${esc(item.text)}</span></label>`;
-      }).join("") : `<p class="map-guide-none">${detailReady.has(active.id) ? "无目标数据" : "正在加载…"}</p>`}</div>`
+      }).join("") : (detailReady.has(active.id) ? `<p class="map-guide-none">无目标数据</p>` : spin("正在加载", true))}</div>`
     : "";
   const url = active ? guideUrl(active.id) : "";
   node.innerHTML = `<div class="map-guide-card">
@@ -575,6 +584,7 @@ function paintGuide() {
       </div>
     </div>
   </div>`;
+  if (fresh) fadeIn(node);
 }
 
 export function openMapGuide(id: string) {
@@ -782,20 +792,20 @@ function blank(index: number, first: string) {
 
 export function closeMapSummary() {
   const modal = document.querySelector<HTMLElement>("#map-summary-modal");
-  if (modal) modal.hidden = true;
+  if (modal) void fadeOut(modal);
 }
 
 export async function openMapSummary() {
   const modal = document.querySelector<HTMLElement>("#map-summary-modal");
   const body = document.querySelector("#map-summary-body");
   if (!modal || !body) return;
-  modal.hidden = false;
+  fadeIn(modal);
   const picked = tasks.filter((task) => statusOf(task) === "active" && task.onMap);
   if (!picked.length) {
     body.innerHTML = `<p class="map-summary-empty">还没有进行中的本地图任务</p>`;
     return;
   }
-  body.innerHTML = `<p class="map-summary-empty">正在加载…</p>`;
+  body.innerHTML = spin("正在加载");
   try {
     const ids = picked.map((task) => task.id).slice(0, 40).join(",");
     const data = await invoke<{ items?: Record<string, unknown>[] }>("site_get", {

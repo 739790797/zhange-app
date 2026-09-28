@@ -1,6 +1,21 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import rawMaps from "./data/tarkov-dev-maps.json";
+import {
+  adoptAccount,
+  collapsedAppIds,
+  copyAccount,
+  currentAccount,
+  ensureAccountFilters,
+  floorForMap,
+  layerVisible,
+  noteArrivedLoot,
+  onAccountApplied,
+  setAccountFloor,
+  setAccountLayer,
+  setAccountStyle,
+  toggleAccountCollapsed,
+} from "./mapFilterAccount";
 import { loadOwnedKeyIds } from "./keys";
 import { floorForSpan, markerFloorBands, markerFloorDisplay, spanOnFloor, type FloorBand, type HeightPoint } from "./mapFloor";
 import {
@@ -41,7 +56,7 @@ type MapLayer = {
   tilePath?: string;
   heightRange?: number[];
   normalizedName?: string;
-  layers?: { name: string; tilePath?: string; svgLayer?: string; extents?: { height?: number[]; bounds?: unknown }[] | null }[];
+  layers?: { name: string; show?: boolean; tilePath?: string; svgLayer?: string; extents?: { height?: number[]; bounds?: unknown }[] | null }[];
 };
 
 type MapGroup = { normalizedName: string; maps: MapLayer[] };
@@ -75,37 +90,55 @@ export type FilterPrefs = { off: string[]; style: "tile" | "svg"; floor: string;
 
 const prefsKey = "zhange.map.filters";
 
-function loadPrefs(): FilterPrefs {
-  try {
-    const raw = sessionStorage.getItem(prefsKey);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<FilterPrefs>;
-      return {
-        off: parsed.off || [],
-        style: parsed.style === "svg" ? "svg" : "tile",
-        floor: parsed.floor || "",
-        collapsed: parsed.collapsed || [],
-      };
-    }
-  } catch {
-    /* 没有记录时全部按默认勾选 */
-  }
-  return { off: [], style: "tile", floor: "", collapsed: [] };
+let prefs: FilterPrefs = {
+  off: [],
+  style: currentAccount().style,
+  floor: "",
+  collapsed: collapsedAppIds(),
+};
+
+function mapFilterKey() {
+  return activeConfig?.key || "";
 }
 
-let prefs = loadPrefs();
+function applyAccountView() {
+  const saved = currentAccount();
+  prefs.style = saved.style;
+  prefs.floor = floorForMap(mapFilterKey(), activeConfig?.layers);
+  prefs.collapsed = collapsedAppIds();
+  prefs.off = derivedOff();
+}
+
+function derivedOff() {
+  const keys = new Set<string>(["places", "tasks", "locks", "stationary", "switches", "btr", "extracts:pmc", "extracts:scav", "extracts:shared", "extracts:transit", "spawns:pmc", "spawns:scav", "spawns:sniper", "spawns:boss"]);
+  for (const key of layers.keys()) keys.add(key);
+  return [...keys].filter((key) => !layerVisible(key));
+}
 
 function savePrefs() {
-  sessionStorage.setItem(prefsKey, JSON.stringify(prefs));
+  applyAccountView();
+  try {
+    sessionStorage.setItem(prefsKey, JSON.stringify(prefs));
+  } catch {
+    /* 会话写不进时账号记录仍会上传 */
+  }
 }
 
+function refreshFromAccount() {
+  applyAccountView();
+  applyRememberedBase();
+  for (const key of layers.keys()) applyLayer(key);
+  if (filterConfig && filterDetail) paintFilters(filterConfig, filterDetail);
+}
+
+onAccountApplied(refreshFromAccount);
+
 function layerOn(key: string) {
-  return !prefs.off.includes(key);
+  return layerVisible(key);
 }
 
 function rememberLayer(key: string, on: boolean) {
-  prefs.off = prefs.off.filter((item) => item !== key);
-  if (!on) prefs.off.push(key);
+  setAccountLayer(key, on);
   savePrefs();
 }
 
@@ -366,52 +399,15 @@ function renderPlaceBar() {
   if (!host) return;
   const place = selectedPlace();
   const editing = placeEditing;
-  host.innerHTML = `
-    <div class="place-bar">
-      <button type="button" data-place-edit class="${editing ? "on" : ""}">${editing ? "完成地点" : "编辑地点"}</button>
-      <button type="button" data-place-new ${editing ? "" : "disabled"} class="${placeDraft && placeShape === "point" ? "on" : ""}">新地点</button>
-      <button type="button" data-place-box ${editing ? "" : "disabled"} class="${placeDraft && placeShape === "box" ? "on" : ""}">新区域</button>
-      ${placeNote ? `<p>${escPlayer(placeNote)}</p>` : ""}
-      ${editing && (place || (placeDraft && placeShape === "point") || draftBox) ? `<form id="place-form">
+  const form = editing && (place || (placeDraft && placeShape === "point") || draftBox) ? `<form id="place-form">
         <textarea name="name" rows="4" placeholder="地点名称，回车换行">${escPlayer(place?.name || "")}</textarea>
         <div>
           <button type="submit" ${placeSaving ? "disabled" : ""}>保存</button>
           ${place ? `<button type="button" data-place-delete ${placeSaving ? "disabled" : ""}>删除</button>` : ""}
         </div>
-      </form>` : ""}
-    </div>`;
-  host.querySelector<HTMLButtonElement>("[data-place-edit]")?.addEventListener("click", () => {
-    placeEditing = !placeEditing;
-    stopPlaceDraft();
-    placeSelected = "";
-    placeNote = placeEditing ? "点地名可改字，拖动可挪位置。新区域请按住拖出矩形。" : "";
-    renderPlaceBar();
-    redrawPlaces();
-  });
-  host.querySelector<HTMLButtonElement>("[data-place-new]")?.addEventListener("click", () => {
-    if (!placeEditing) return;
-    if (placeDraft && placeShape === "point") stopPlaceDraft();
-    else {
-      stopPlaceDraft();
-      placeDraft = true;
-      placeShape = "point";
-      placeSelected = "";
-      placeNote = "在地图上点一下，放下新地点。";
-    }
-    renderPlaceBar();
-  });
-  host.querySelector<HTMLButtonElement>("[data-place-box]")?.addEventListener("click", () => {
-    if (!placeEditing) return;
-    if (placeDraft && placeShape === "box") stopPlaceDraft();
-    else {
-      stopPlaceDraft();
-      placeDraft = true;
-      placeShape = "box";
-      placeSelected = "";
-      placeNote = "按住地图拖出一块区域。";
-    }
-    renderPlaceBar();
-  });
+      </form>` : "";
+  const note = placeNote ? `<p>${escPlayer(placeNote)}</p>` : "";
+  host.innerHTML = form || note ? `<div class="place-bar">${note}${form}</div>` : "";
   host.querySelector("#place-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const input = host.querySelector<HTMLTextAreaElement>("[name=name]");
@@ -691,14 +687,14 @@ function applyRememberedBase() {
 }
 
 export function setMapStyle(style: "tile" | "svg") {
-  prefs.style = style;
+  setAccountStyle(style);
   savePrefs();
   applyRememberedBase();
 }
 
 export function setMapFloor(name: string) {
-  prefs.floor = name;
-  prefs.style = "tile";
+  setAccountFloor(mapFilterKey(), name);
+  setAccountStyle("tile");
   savePrefs();
   applyRememberedBase();
   applyFloorFade();
@@ -707,10 +703,9 @@ export function setMapFloor(name: string) {
 }
 
 export function toggleFold(id: string) {
-  const collapsed = prefs.collapsed.includes(id);
-  prefs.collapsed = collapsed ? prefs.collapsed.filter((item) => item !== id) : [...prefs.collapsed, id];
+  const collapsed = toggleAccountCollapsed(id);
   savePrefs();
-  return !collapsed;
+  return collapsed;
 }
 
 function applyLayer(key: string) {
@@ -732,20 +727,20 @@ export function setLayerVisible(key: string, on: boolean) {
 }
 
 export function snapshotPrefs(): FilterPrefs {
+  applyAccountView();
   return { off: [...prefs.off], style: prefs.style, floor: prefs.floor, collapsed: [...prefs.collapsed] };
 }
 
+export function snapshotAccount() {
+  return copyAccount();
+}
+
 export function replacePrefs(next: Partial<FilterPrefs>) {
-  prefs = {
-    off: next.off || [],
-    style: next.style === "svg" ? "svg" : "tile",
-    floor: next.floor || "",
-    collapsed: next.collapsed || [],
-  };
-  savePrefs();
-  applyRememberedBase();
-  for (const key of layers.keys()) applyLayer(key);
-  applyFloorFade();
+  const merged = copyAccount();
+  if (next.style === "svg" || next.style === "tile") merged.style = next.style;
+  const key = mapFilterKey();
+  if (key && typeof next.floor === "string") merged.floorsByMap[key] = next.floor;
+  adoptAccount(merged);
 }
 
 export function liveMapCamera(): { lat: number; lng: number; zoom: number } | null {
@@ -954,31 +949,33 @@ export async function mountLiveMap(slug: string, fit = true) {
     root.addEventListener("click", onClick);
     event.popup.once("remove", () => root.removeEventListener("click", onClick));
   });
+  mapSlug = slug;
   if (fit) map.fitBounds(bounds);
+  await ensureAccountFilters(config.key);
+  if (myToken !== token || !map) return;
+  applyAccountView();
   applyRememberedBase();
   hookPlayers();
-  drawPlayers(false);
   if (myToken !== token) return;
+  mapReady?.();
   try {
     const detail = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/maps/${slug}?loot_loose=true&loot_containers=true` });
     const owned = await loadOwnedKeyIds();
     setOwnedQuestKeys(owned);
     if (myToken !== token || !map) return;
-    mapSlug = slug;
     filterConfig = config;
     filterDetail = detail;
     ensureQuestGroups();
     paintMarkers(detail);
     for (const key of layers.keys()) applyLayer(key);
     paintFilters(config, detail);
-    drawPlayers(false);
-    mapReady?.();
     map.on("zoomend", () => {
       window.clearTimeout(labelTimer);
       labelTimer = window.setTimeout(paintQuestLabels, 80);
     });
     void reloadQuestGeometry();
   } catch (error) {
+    if (myToken !== token || !map) return;
     if (panel) panel.textContent = error instanceof Error ? error.message : "地图数据读取失败";
   }
 }
@@ -1254,22 +1251,63 @@ function group(id: string, title: string, icon: string, keys: string[], body: st
   return `<div class="filter-block"><div class="filter-head"><label class="filter-row"><input type="checkbox" ${parentOn ? "checked" : ""} data-group="${present.join(",")}" />${image}<span>${title}</span></label><button type="button" class="filter-fold" data-fold="${id}">${collapsed ? "＋" : "－"}</button></div><div class="filter-children" data-children="${id}" ${collapsed ? "hidden" : ""}>${body}</div></div>`;
 }
 
+const FLOOR_ZH: Record<string, string> = {
+  "1st Floor": "1 层", "2nd Floor": "2 层", "3rd Floor": "3 层", "4th Floor": "4 层", "5th Floor": "5 层",
+  Underground: "地下", "Second Level": "2 层", "Technical Level": "技术层", Technical: "技术层", Garage: "车库",
+  Tunnels: "隧道", Bunkers: "地堡", Infirmary: "医务室", Helipad: "停机坪", "Gym/Canteen": "健身房 / 食堂",
+  "Accommodation (lower)": "住宿（下层）", "Accommodation (mid)": "住宿（中层）", "Accommodation (upper)": "住宿（上层）",
+  "Officers' Deck": "军官甲板", "Stairs (blocked)": "楼梯（封死）", Bridge: "舰桥", "Bridge Roof": "舰桥顶",
+  "Control Room": "控制室", "Engine Room": "轮机舱", "Engine Room (upper)": "轮机舱（上层）",
+  "Fuel Pumps (lower)": "燃油泵（下层）", "Fuel Pumps": "燃油泵", "Storage/Security": "仓储 / 安保",
+};
+
+function floorLabel(name: string) {
+  return FLOOR_ZH[name] || name;
+}
+
+function foldBlock(id: string, title: string, body: string) {
+  if (!body) return "";
+  const collapsed = prefs.collapsed.includes(id);
+  return `<div class="filter-block"><div class="filter-head"><span class="filter-title">${title}</span><button type="button" class="filter-fold" data-fold="${id}">${collapsed ? "＋" : "－"}</button></div><div class="filter-children" data-children="${id}" ${collapsed ? "hidden" : ""}>${body}</div></div>`;
+}
+
+function landmarksBlock() {
+  const places = layers.has("places");
+  const btr = layers.has("btr");
+  const btrRow = row("btr", "BTR 停车点", `${ICON}/btr_stop.png`, places);
+  if (places && btr) {
+    const collapsed = prefs.collapsed.includes("landmarks");
+    return `<div class="filter-block"><div class="filter-head"><label class="filter-row"><input type="checkbox" ${layerOn("places") ? "checked" : ""} data-layer="places" /><span>地名</span></label><button type="button" class="filter-fold" data-fold="landmarks">${collapsed ? "＋" : "－"}</button></div><div class="filter-children" data-children="landmarks" ${collapsed ? "hidden" : ""}>${btrRow}</div></div>`;
+  }
+  return `${places ? row("places", "地名") : ""}${btr ? row("btr", "BTR 停车点", `${ICON}/btr_stop.png`) : ""}`;
+}
+
 function paintFilters(config: MapLayer, detail: Record<string, unknown>) {
   const panel = document.querySelector("#filter-body");
   if (!panel) return;
-  const floors = (config.layers || []).filter((item) => item.tilePath);
-  const floorNames: Record<string, string> = { "1st Floor": "1 层", "2nd Floor": "2 层", "3rd Floor": "3 层", "4th Floor": "4 层", "5th Floor": "5 层", Underground: "地下", Garage: "车库" };
+  const floors = (config.layers || []).filter((item) => item.tilePath || item.svgLayer);
   const floorOnMap = floors.some((floor) => floor.name === prefs.floor);
   const hazards = (detail.hazards as { hazard_type?: string }[]) || [];
-  const hazardKinds = [...new Set(hazards.map((row) => String(row.hazard_type || "hazard")))];
+  const hazardKinds = [...new Set(hazards.map((item) => String(item.hazard_type || "hazard")))];
   const containers = (detail.loot_containers as { normalized_name?: string }[]) || [];
-  const containerKinds = [...new Set(containers.map((row) => containerKind(String(row.normalized_name || ""))))];
+  const containerKinds = [...new Set(containers.map((item) => containerKind(String(item.normalized_name || ""))))];
   const looseRows = (detail.loot_loose as LoosePile[]) || [];
-  const looseKinds = LOOSE_ORDER.filter((kind) => looseRows.some((row) => looseKind(row) === kind));
+  const looseKinds = LOOSE_ORDER.filter((kind) => looseRows.some((item) => looseKind(item) === kind));
+  noteArrivedLoot(containerKinds, looseKinds);
+  const shownStyle = prefs.style === "svg" && config.svgPath ? "svg" : prefs.style === "tile" && config.tilePath ? "tile" : config.svgPath ? "svg" : "tile";
+  const style = [
+    config.tilePath ? `<label class="filter-row"><input type="radio" name="map-style" ${shownStyle === "tile" ? "checked" : ""} data-style="tile" /><span>卫星图</span></label>` : "",
+    config.svgPath ? `<label class="filter-row"><input type="radio" name="map-style" ${shownStyle === "svg" ? "checked" : ""} data-style="svg" /><span>抽象图</span></label>` : "",
+  ].join("");
+  const levels = floors.length ? foldBlock("levels", "层级", [
+    `<label class="filter-row filter-child"><input type="radio" name="map-floor" ${floorOnMap ? "" : "checked"} data-floor="" /><span>地面</span></label>`,
+    ...floors.map((floor) => `<label class="filter-row filter-child"><input type="radio" name="map-floor" ${prefs.floor === floor.name ? "checked" : ""} data-floor="${floor.name}" /><span>${floorLabel(floor.name)}</span></label>`),
+  ].join("")) : "";
   const html = [
-    `<div class="filter-block"><p class="filter-title">底图样式</p>${config.tilePath ? `<label class="filter-row"><input type="radio" name="map-style" ${prefs.style !== "svg" ? "checked" : ""} data-style="tile" /><span>卫星图</span></label>` : ""}${config.svgPath ? `<label class="filter-row"><input type="radio" name="map-style" ${prefs.style === "svg" ? "checked" : ""} data-style="svg" /><span>抽象图</span></label>` : ""}</div>`,
-    floors.length ? `<div class="filter-block"><p class="filter-title">层级</p><label class="filter-row"><input type="radio" name="map-floor" ${floorOnMap ? "" : "checked"} data-floor="" /><span>地面</span></label>${floors.map((floor) => `<label class="filter-row"><input type="radio" name="map-floor" ${prefs.floor === floor.name ? "checked" : ""} data-floor="${floor.name}" /><span>${floorNames[floor.name] || floor.name}</span></label>`).join("")}</div>` : "",
-    row("places", "地名"),
+    style ? `<div class="filter-block">${style}</div>` : "",
+    style && levels ? `<span class="filter-split"></span>` : "",
+    levels,
+    landmarksBlock(),
     group("extracts", "撤离点", "", ["extracts:pmc", "extracts:scav", "extracts:shared", "extracts:transit"], [
       row("extracts:pmc", "PMC", `${ICON}/extract_pmc.png`, true),
       row("extracts:scav", "Scav", `${ICON}/extract_scav.png`, true),
@@ -1282,11 +1320,10 @@ function paintFilters(config: MapLayer, detail: Record<string, unknown>) {
       row("spawns:sniper", "狙击 Scav", `${ICON}/spawn_sniper_scav.png`, true),
       row("spawns:boss", "Boss", `${ICON}/spawn_boss.png`, true),
     ].join("")),
-    group("usable", "可使用", "", ["locks", "stationary", "switches", "btr"], [
+    group("usable", "可使用", "", ["locks", "stationary", "switches"], [
       row("locks", "锁", `${ICON}/lock.png`, true),
       row("stationary", "固定机枪", `${ICON}/stationarygun.png`, true),
       row("switches", "开关", `${ICON}/switch.png`, true),
-      row("btr", "BTR 停车点", `${ICON}/btr_stop.png`, true),
     ].join("")),
     group("hazards", "危险区", `${ICON}/hazard.png`, hazardKinds.map((kind) => `hazards:${kind}`), hazardKinds.map((kind) => row(`hazards:${kind}`, hazardLabel(kind, kind), `${ICON}/${kind === "mortar" ? "hazard_mortar" : "hazard"}.png`, true)).join("")),
     group("loot", "可搜刮物品", `${ICON}/container_crate.png`, containerKinds.map((kind) => `loot:${kind}`), containerKinds.map((kind) => row(`loot:${kind}`, containerLabel(kind), containerIcon(kind), true)).join("")),
@@ -1295,6 +1332,11 @@ function paintFilters(config: MapLayer, detail: Record<string, unknown>) {
     `<div class="filter-block"><p class="filter-title">位置同步</p><p class="filter-note" id="shot-note">${escPlayer(shotNote)}</p></div>`,
   ];
   panel.innerHTML = html.filter(Boolean).join("");
+  for (const box of panel.querySelectorAll<HTMLInputElement>("[data-group]")) {
+    const keys = (box.dataset.group || "").split(",").filter(Boolean);
+    const selected = keys.filter((key) => layerOn(key)).length;
+    box.indeterminate = selected > 0 && selected < keys.length;
+  }
   const parent = panel.querySelector<HTMLInputElement>("[data-quest-parent]");
   if (parent) {
     const keys = questPeopleRows.map(personKey);

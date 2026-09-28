@@ -1,3 +1,7 @@
+import { bindItemDetail, gunReceiverId, renderItem } from "./itemDetail";
+import { mapTitle } from "./mapNames";
+import { spin } from "./spinner";
+
 export type WikiKind = "item" | "task" | "trader" | "boss";
 
 export type WikiHit = {
@@ -85,6 +89,17 @@ function field(row: Record<string, unknown>, ...keys: string[]) {
   return "";
 }
 
+function bodyName(value: string) {
+  const text = value.trim();
+  if (!text || /[\u4e00-\u9fff]/.test(text)) return text;
+  const key = text.toLowerCase().replace(/[\s_-]+/g, "");
+  const label: Record<string, string> = {
+    head: "头部", thorax: "胸部", stomach: "腹部",
+    leftarm: "左臂", rightarm: "右臂", leftleg: "左腿", rightleg: "右腿",
+  };
+  return label[key] || text;
+}
+
 function iconUrl(icon: string, id: string) {
   const link = icon.trim();
   if (link) return link;
@@ -144,7 +159,7 @@ export function readWikiHits(value: unknown, kind: WikiKind): WikiHit[] {
 }
 
 export function wikiShell(spec: WikiSpec) {
-  return `<section class="wiki" id="wiki" data-kind="${spec.kind}" data-id="${esc(spec.id)}"><p class="wiki-note">正在读取…</p></section>`;
+  return `<section class="wiki" id="wiki" data-kind="${spec.kind}" data-id="${esc(spec.id)}">${spin("正在读取")}</section>`;
 }
 
 function jump(kind: string, id: string, label: string) {
@@ -203,8 +218,8 @@ function objectiveText(row: Record<string, unknown>) {
   if (count != null && count > 1) text += ` ×${count}`;
   if (row.optional === true) text += "（可选）";
   if (row.found_in_raid === true || row.foundInRaid === true) text += " · 战局内找到";
-  const maps = rows(row.maps).map((item) => field(item, "name")).filter(Boolean);
-  const plainMaps = Array.isArray(row.maps) ? row.maps.flatMap((item) => typeof item === "string" ? [item] : []) : [];
+  const maps = rows(row.maps).map((item) => mapTitle(field(item, "slug", "id", "normalizedName", "normalized_name"), field(item, "name"), "")).filter(Boolean);
+  const plainMaps = Array.isArray(row.maps) ? row.maps.flatMap((item) => typeof item === "string" ? [mapTitle(item, "", "")] : []) : [];
   const where = [...maps, ...plainMaps].filter((item, index, list) => list.indexOf(item) === index).join("、");
   return where ? `${esc(text)} <em>${esc(where)}</em>` : esc(text);
 }
@@ -250,75 +265,9 @@ function rewardBlock(title: string, value: unknown) {
   return section(title, body);
 }
 
-function tradeBlock(title: string, value: unknown) {
-  const cards = rows(value).map((row) => {
-    const trader = field(row, "traderName", "trader_name") || field(rec(row.trader) || {}, "name");
-    const level = field(row, "level", "min_trader_level", "loyaltyLevel");
-    const station = field(row, "stationName", "station_name", "station");
-    const duration = field(row, "duration");
-    const head = [trader, level ? `LL${level}` : "", station, duration ? `${duration} 秒` : ""].filter(Boolean).join(" · ");
-    const give = chipList(row.requiredItems || row.required_items || row.ingredients || row.sourceItems);
-    const get = chipList(row.rewardItems || row.reward_items || row.products || row.endProducts || row.reward);
-    if (!head && !give && !get) {
-      const fallback = chip(row);
-      return fallback ? `<article class="wiki-trade">${fallback}</article>` : "";
-    }
-    return `<article class="wiki-trade">${head ? `<p>${esc(head)}</p>` : ""}${give ? `<p><span>交出</span>${give}</p>` : ""}${get ? `<p><span>获得</span>${get}</p>` : ""}</article>`;
-  }).filter(Boolean);
-  return section(title, cards.join(""));
-}
-
 function hero(title: string, badge: string, image: string, text: string) {
   const photo = image ? `<img class="wiki-hero-img" src="${esc(image)}" alt="" />` : "";
   return `<header class="wiki-hero">${photo}<div><span class="wiki-badge">${esc(badge)}</span><h1>${esc(title)}</h1>${text ? `<p>${esc(text)}</p>` : ""}</div></header>`;
-}
-
-function itemView(data: Record<string, unknown>) {
-  const item = rec(data.item) || data;
-  const props = rec(data.properties) || rec(item.properties) || {};
-  const name = field(data, "name") || itemName(item) || "物品";
-  const short = field(item, "shortName", "short_name");
-  const desc = field(data, "description") || field(item, "description");
-  const id = field(data, "id") || itemId(item);
-  const image = iconUrl(field(item, "image512pxLink", "inspectImageLink", "gridImageLink", "baseImageLink", "iconLink", "icon_link"), id);
-  const width = num(item.width);
-  const height = num(item.height);
-  const size = width != null && height != null ? `${width} × ${height}` : "";
-  const weight = num(item.weight);
-  const last = rub(item.lastLowPrice ?? item.last_low_price);
-  const avg = rub(item.avg24hPrice ?? item.avg24h_price);
-  const base = rub(item.basePrice ?? item.base_price);
-  const change = num(item.changeLast48hPercent ?? item.change_last_48h_percent);
-  const changeText = change == null ? "" : `${change > 0 ? "+" : ""}${change.toFixed(1)}%`;
-  const categories = rows(item.handbookCategories || item.categories).map((row) => field(row, "name")).filter(Boolean);
-  const plainCats = Array.isArray(item.types) ? item.types.map((item) => str(item)).filter(Boolean) : [];
-  const armor = rows(props.armorSlots || props.armor_slots).map((row) => {
-    const zones = Array.isArray(row.zones) ? row.zones.map((item) => str(item)).filter(Boolean).join("、") : field(row, "name");
-    const klass = field(row, "class");
-    const durability = field(row, "durability");
-    return [zones, klass ? `${klass} 级` : "", durability ? `耐久 ${durability}` : ""].filter(Boolean).join(" · ");
-  }).filter(Boolean);
-  const body = [
-    hero(name, "物品", image, short && short !== name ? short : ""),
-    facts([
-      ["尺寸", esc(size)],
-      ["重量", weight == null ? "" : esc(`${weight} kg`)],
-      ["分类", esc([...categories, ...plainCats].filter((item, index, list) => list.indexOf(item) === index).slice(0, 8).join("、"))],
-      ["最近低价", esc(last)],
-      ["24 小时均价", esc(avg)],
-      ["基础价格", esc(base)],
-      ["48 小时", esc(changeText)],
-    ]),
-    section("说明", desc ? `<p class="wiki-copy">${esc(desc)}</p>` : ""),
-    section("内含物品", chipList(item.containsItems || item.contains_items)),
-    section("护甲", lines(armor.map((item) => esc(item)))),
-    tradeBlock("以物易物", data.barters || item.barters),
-    tradeBlock("制作", data.crafts || item.crafts),
-    tradeBlock("任务", data.quest_rewards || data.tasks || item.tasks),
-    tradeBlock("藏身处", data.hideout || item.hideout),
-    section("掉落", chipList(data.drops || item.drops)),
-  ].join("");
-  return body;
 }
 
 function taskView(data: Record<string, unknown>, id: string) {
@@ -435,12 +384,12 @@ function bossView(data: Record<string, unknown>) {
   const maps = rows(boss.maps || data.maps);
   const where = locations.map((row) => {
     const place = field(row, "name", "zoneName", "zone_name");
-    const map = field(row, "mapName", "map_name") || field(rec(row.map) || {}, "name");
+    const map = mapTitle(field(row, "map_slug", "mapSlug", "slug"), field(row, "mapName", "map_name") || field(rec(row.map) || {}, "name"), "");
     const rate = num(row.chance ?? row.spawnChance ?? row.spawn_chance);
     return [map, place, rate != null ? `${rate}%` : ""].filter(Boolean).join(" · ");
   }).filter(Boolean);
   const mapNames = maps.map((row) => {
-    const label = field(row, "name");
+    const label = mapTitle(field(row, "slug", "map_slug", "mapSlug"), field(row, "name"), "");
     const rate = num(row.spawnChance ?? row.spawn_chance);
     return [label, rate != null ? `${rate}%` : ""].filter(Boolean).join(" · ");
   }).filter(Boolean);
@@ -452,7 +401,7 @@ function bossView(data: Record<string, unknown>) {
     return slug ? jump("boss", slug, text) : esc(text);
   });
   const parts = health.map((row) => {
-    const part = field(row, "bodyPart", "body_part", "name", "id");
+    const part = bodyName(field(row, "bodyPart", "body_part", "name", "id"));
     const max = field(row, "max", "health");
     return part && max ? `${part} ${max}` : part;
   }).filter(Boolean);
@@ -505,7 +454,7 @@ export async function mountWiki(spec: WikiSpec) {
       traderPage = 1;
     }
   }
-  host.innerHTML = `<p class="wiki-note">正在读取…</p>`;
+  host.innerHTML = spin("正在读取");
   try {
     const path = spec.kind === "item"
       ? `/guides/tarkov/items/${encodeURIComponent(spec.id)}`
@@ -518,15 +467,26 @@ export async function mountWiki(spec: WikiSpec) {
     if (seq !== wikiSeq) return;
     const live = document.querySelector<HTMLElement>("#wiki");
     if (!live || live.getAttribute("data-id") !== spec.id) return;
+    let receiver: Record<string, unknown> | null = null;
+    if (spec.kind === "item") {
+      const receiverId = gunReceiverId(data);
+      if (receiverId) {
+        receiver = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/items/${encodeURIComponent(receiverId)}` }).catch(() => null);
+        if (seq !== wikiSeq) return;
+      }
+    }
     const body = spec.kind === "item"
-      ? itemView(data)
+      ? renderItem(data, receiver)
       : spec.kind === "task"
         ? taskView(data, spec.id)
         : spec.kind === "boss"
           ? bossView(data)
           : traderView(data, spec.id);
-    live.innerHTML = body || `<p class="wiki-note">没有读到内容</p>`;
-    if (spec.kind === "trader") bindTrader(live, spec);
+    const shown = document.querySelector<HTMLElement>("#wiki");
+    if (!shown || shown.getAttribute("data-id") !== spec.id) return;
+    shown.innerHTML = body || `<p class="wiki-note">没有读到内容</p>`;
+    if (spec.kind === "item") bindItemDetail(shown);
+    if (spec.kind === "trader") bindTrader(shown, spec);
   } catch (error) {
     if (seq !== wikiSeq) return;
     const live = document.querySelector("#wiki");

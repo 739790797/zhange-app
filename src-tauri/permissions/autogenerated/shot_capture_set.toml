@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-shot-capture-set"
+description = "Enables the shot_capture_set command without any pre-configured scope."
+commands.allow = ["shot_capture_set"]
+
+[[permission]]
+identifier = "deny-shot-capture-set"
+description = "Denies the shot_capture_set command without any pre-configured scope."
+commands.deny = ["shot_capture_set"]

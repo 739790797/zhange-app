@@ -1,3 +1,6 @@
+import { bindListSearch, listAllIcon, listBusy, listFail, listFrame, listItem, listShell, repaintList, stayOnList } from "./listFrame";
+import { mapTitle } from "./mapNames";
+
 type KeyRow = {
   id: string;
   name: string;
@@ -94,7 +97,8 @@ function readKey(row: Record<string, unknown>, map: string): KeyRow | null {
 
 function readGroup(row: Record<string, unknown>, fallback: string): KeyGroup | null {
   const slug = str(row.slug) || fallback;
-  const name = str(row.name) || (fallback === "unbound" ? "未归类" : slug);
+  const raw = str(row.name);
+  const name = fallback === "unbound" ? raw || "未归类" : mapTitle(slug, raw);
   const keys = (Array.isArray(row.keys) ? row.keys : []).flatMap((item) => {
     const key = rec(item);
     const parsed = key ? readKey(key, name) : null;
@@ -104,8 +108,10 @@ function readGroup(row: Record<string, unknown>, fallback: string): KeyGroup | n
   return keys.length || fallback === "unbound" ? { slug, name, keys } : null;
 }
 
+const KEYS_HREF = "/主菜单/逃离塔科夫/钥匙管理";
+
 export function keyShell() {
-  return `<section class="keys" id="keys"><p class="wiki-note">正在读取钥匙…</p></section>`;
+  return listShell("keys", "正在读取钥匙");
 }
 
 function visible(slug: string) {
@@ -121,31 +127,45 @@ function visible(slug: string) {
 }
 
 function render(slug: string) {
-  const side = [`<a class="${slug ? "" : "on"}" href="/主菜单/逃离塔科夫/钥匙" data-link>全部</a>`, ...groups.map((group) => `<a class="${group.slug === slug ? "on" : ""}" href="/主菜单/逃离塔科夫/钥匙/${esc(group.slug)}" data-link>${esc(group.name)}<span>${group.keys.length}</span></a>`)].join("");
-  const list = visible(slug);
-  const cards = list.map((key) => {
+  const current = slug ? groups.find((group) => group.slug === slug) : null;
+  const listed = groups.filter((group) => group.slug === current?.slug || visible(group.slug).length > 0);
+  const side = [
+    listItem("全部", !current, `href="${KEYS_HREF}" data-link`, listAllIcon()),
+    ...listed.map((group) => listItem(
+      `${esc(group.name)} ${visible(group.slug).length}`,
+      group.slug === current?.slug,
+      `href="${KEYS_HREF}/${esc(group.slug)}" data-link`,
+    )),
+  ].join("");
+  const list = visible(current?.slug || "");
+  const rows = list.map((key) => {
     const mine = owned.has(key.id);
-    return `<article class="key-card${mine ? " mine" : ""}">
-      <button type="button" class="key-open" data-wiki="item" data-wiki-id="${esc(key.id)}">${key.icon ? `<img src="${esc(key.icon)}" alt="" />` : "<i></i>"}<span><strong>${esc(key.short || key.name)}</strong><em>${esc(key.name)}</em></span></button>
-      <p>${esc([key.map, key.uses ? `耐久 ${key.uses}` : "", key.price].filter(Boolean).join(" · "))}</p>
-      ${key.detail ? `<p class="key-detail">${esc(key.detail)}</p>` : ""}
-      <button type="button" data-key-own="${esc(key.id)}" class="${mine ? "on" : ""}" ${ownsReady ? "" : "disabled"}>${ownsReady ? (mine ? "取消我有" : "标记我有") : "拥有状态未读取"}</button>
-    </article>`;
+    const image = key.icon ? `<img src="${esc(key.icon)}" alt="" />` : "<i></i>";
+    const label = key.short && key.short !== key.name ? key.short : key.name;
+    return `<tr>
+      <td><button type="button" class="tarkov-list-name" data-wiki="item" data-wiki-id="${esc(key.id)}" title="${esc(key.name)}">${image}<span>${esc(label)}</span></button></td>
+      <td>${esc(key.map || "—")}</td>
+      <td class="num">${esc(key.uses || "—")}</td>
+      <td class="num">${esc(key.price || "—")}</td>
+      <td class="key-note" title="${esc(key.detail)}">${esc(key.detail || "—")}</td>
+      <td><button type="button" class="key-own${mine ? " on" : ""}" data-key-own="${esc(key.id)}" ${ownsReady ? "" : "disabled"}>${ownsReady ? (mine ? "已拥有" : "未拥有") : "未读取"}</button></td>
+    </tr>`;
   }).join("");
-  return `
-    <div class="keys-layout">
-      <aside class="keys-side">${side}</aside>
-      <div class="keys-main">
-        <form id="key-find" class="wiki-tools">
-          <input name="q" value="${esc(query)}" placeholder="搜索钥匙、任务或用途" aria-label="搜索钥匙" />
-          <button type="submit">搜索</button>
-          <button type="button" data-key-have="all" class="${have === "all" ? "on" : ""}">全部</button>
-          <button type="button" data-key-have="owned" class="${have === "owned" ? "on" : ""}">已拥有</button>
-          <button type="button" data-key-have="missing" class="${have === "missing" ? "on" : ""}">未拥有</button>
-        </form>
-        ${cards ? `<div class="keys-grid">${cards}</div>` : `<p class="wiki-note">没有符合筛选的钥匙。</p>`}
-      </div>
-    </div>`;
+  const filters = `<div class="tarkov-list-kinds">
+    <button type="button" data-key-have="all" class="${have === "all" ? "on" : ""}">全部</button>
+    <button type="button" data-key-have="owned" class="${have === "owned" ? "on" : ""}">已拥有</button>
+    <button type="button" data-key-have="missing" class="${have === "missing" ? "on" : ""}">未拥有</button>
+  </div>`;
+  const panel = rows
+    ? `<table class="tarkov-list-table"><thead><tr><th>名称</th><th>地图</th><th class="num">耐久</th><th class="num">价格</th><th>说明</th><th>拥有</th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<p class="tarkov-list-empty">没有符合筛选的钥匙。</p>`;
+  return listFrame({
+    side,
+    meta: `共 ${list.length} 把${current ? ` · ${esc(current.name)}` : ""}`,
+    filters,
+    search: { id: "key-find", value: query, placeholder: "搜索钥匙、任务或用途", label: "搜索钥匙" },
+    panel,
+  });
 }
 
 async function toggle(id: string, slug: string) {
@@ -166,7 +186,7 @@ async function toggle(id: string, slug: string) {
   } catch (error) {
     owned = previous;
     paint(slug);
-    const live = document.querySelector(".keys-main");
+    const live = document.querySelector(".tarkov-list-main");
     if (!live) return;
     const message = document.createElement("p");
     message.className = "wiki-note";
@@ -178,11 +198,11 @@ async function toggle(id: string, slug: string) {
 function paint(slug: string) {
   const host = document.querySelector<HTMLElement>("#keys");
   if (!host) return;
-  host.innerHTML = render(slug);
-  host.querySelector("#key-find")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = host.querySelector<HTMLInputElement>("[name=q]");
-    query = input?.value.trim() || "";
+  repaintList(host, "key-find", () => {
+    host.innerHTML = render(slug);
+  });
+  bindListSearch(host, "key-find", (value) => {
+    query = value;
     paint(slug);
   });
   host.querySelectorAll<HTMLButtonElement>("[data-key-have]").forEach((button) => {
@@ -200,11 +220,19 @@ function paint(slug: string) {
   });
 }
 
+export function openKeyList(href: string) {
+  if (!groups.length) return false;
+  const hit = stayOnList(document.querySelector("#keys"), href, KEYS_HREF);
+  if (!hit) return false;
+  if (!hit.same) paint(groups.some((item) => item.slug === hit.slug) ? hit.slug : "");
+  return true;
+}
+
 export async function mountKeys(slug: string) {
   const token = ++seq;
   const host = document.querySelector<HTMLElement>("#keys");
   if (!host) return;
-  host.innerHTML = `<p class="wiki-note">正在读取钥匙…</p>`;
+  listBusy(host, "正在读取钥匙");
   try {
     const [packs, owns] = await Promise.all([
       invoke<{ maps?: Record<string, unknown>[]; unbound?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/key-packs" }),
@@ -235,9 +263,8 @@ export async function mountKeys(slug: string) {
     paint(groups.some((item) => item.slug === slug) ? slug : "");
   } catch (error) {
     if (token !== seq) return;
-    const live = document.querySelector("#keys");
+    const live = document.querySelector<HTMLElement>("#keys");
     if (!live) return;
-    const message = error instanceof Error ? error.message : "钥匙读取失败";
-    live.innerHTML = `<p class="wiki-note">${esc(message)}</p>`;
+    listFail(live, error instanceof Error ? error.message : "钥匙读取失败");
   }
 }

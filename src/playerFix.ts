@@ -50,7 +50,7 @@ let roomReady = false;
 let logSlug = "";
 let phaseKind = "";
 let raidId = "";
-let offlineMap = "";
+let syncEnabled = true;
 let hotkeyLabel = "Print Screen";
 let seated = new Set<number>();
 let shot: ShotState | null = null;
@@ -101,13 +101,8 @@ function colorFor(userId: number) {
   return COLORS[index] || COLORS[0];
 }
 
-function inMapPhase(phase: string) {
-  return phase === "map_loading" || phase === "match_found" || phase === "raid_starting" || phase === "raid_started";
-}
-
 function raidMap() {
-  if (logSlug) return logSlug;
-  return inMapPhase(phaseKind) ? offlineMap : "";
+  return logSlug;
 }
 
 function suppressed() {
@@ -205,6 +200,7 @@ function note(showing: boolean) {
   if (!shot?.bound) return "先在妙妙工具的目录绑定里设定截图目录";
   if (shot.missing) return "截图目录不存在，请重新绑定";
   if (showing) return roomReady ? "正在把你的位置同步到房间" : "位置已标在这张图上";
+  if (!syncEnabled) return "截图同步已关闭";
   if (suppressed()) return "这场战局在另一张图上，位置不会标在这里";
   if (shot.fileName && shot.x == null) return `截图无坐标，请在战局里用 ${hotkeyLabel}`;
   if (shot.fileName && shot.x != null && !fresh(shot.modifiedMs)) return "最近一张截图已过期，请在战局里再截一次";
@@ -389,14 +385,14 @@ export function startPlayerSync() {
     paint();
     void publishPhase();
   }).catch(() => undefined);
-  const applySettings = (row: { hotkey?: string; offlineMap?: string }) => {
+  const applySettings = (row: { hotkey?: string; syncEnabled?: boolean }) => {
     hotkeyLabel = row.hotkey === "PrintScreen" || !row.hotkey ? "Print Screen" : row.hotkey;
-    offlineMap = row.offlineMap || "";
+    syncEnabled = row.syncEnabled !== false;
     paint();
   };
-  void invoke<{ hotkey?: string; offlineMap?: string }>("shot_settings_get").then(applySettings).catch(() => undefined);
+  void invoke<{ hotkey?: string; syncEnabled?: boolean }>("shot_settings_get").then(applySettings).catch(() => undefined);
   window.addEventListener("zhange-shot-settings", (event) => {
-    applySettings((event as CustomEvent<{ hotkey?: string; offlineMap?: string }>).detail || {});
+    applySettings((event as CustomEvent<{ hotkey?: string; syncEnabled?: boolean }>).detail || {});
   });
   void invoke<{ id?: number; display_name?: string; username?: string }>("site_get", { path: "/auth/me" }).then((me) => {
     selfId = Number(me?.id || 0);

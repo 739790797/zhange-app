@@ -20,6 +20,7 @@
     "allow-shot-state",
     "allow-shot-settings-get",
     "allow-shot-settings-set",
+    "allow-shot-capture-set",
     "allow-app-usage",
     "allow-paths-get",
     "allow-paths-set",

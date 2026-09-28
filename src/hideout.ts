@@ -1,3 +1,6 @@
+import { bindListSearch, listAllIcon, listBusy, listFrame, listIcon, listItem, listShell, repaintList, stayOnList } from "./listFrame";
+import { spin } from "./spinner";
+
 type Need = { id: string; name: string; count: number; icon: string; fir: boolean };
 type StationNeed = { id: string; level: number };
 type Level = { level: number; items: Need[]; stations: StationNeed[]; bonuses: string[] };
@@ -10,6 +13,7 @@ let built = new Map<string, number>();
 let stashFloor = 1;
 let preview = 0;
 let previewKey = "";
+let hideoutQuery = "";
 
 function esc(value: string) {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
@@ -173,18 +177,32 @@ function summaryHtml() {
 }
 
 export function hideoutShell() {
-  return `<section class="hideout" id="hideout"><p class="wiki-note">正在读取藏身处…</p></section>`;
+  return listShell("hideout", "正在读取藏身处");
 }
 
-function render(selected: Station | null, crafts: Craft[]) {
-  const side = stations.map((station) => {
-    const current = currentOf(station);
-    const max = maxOf(station);
-    const on = selected?.id === station.id;
-    return `<a class="hideout-station${on ? " on" : ""}" href="/主菜单/逃离塔科夫/藏身处/${esc(station.slug)}" data-link><strong>${esc(station.name)}</strong><span>Lv.${current}${max ? ` / ${max}` : ""}</span></a>`;
-  }).join("");
+function render(selected: Station | null, crafts: Craft[], pending = false) {
+  const needle = hideoutQuery.trim().toLowerCase();
+  const listed = stations.filter((station) => !needle || station.name.toLowerCase().includes(needle) || station.id === selected?.id);
+  const side = [
+    listItem("全部", !selected, `href="/主菜单/逃离塔科夫/藏身处" data-link`, listAllIcon()),
+    ...listed.map((station) => {
+      const current = currentOf(station);
+      const max = maxOf(station);
+      return listItem(
+        `${esc(station.name)} ${current}${max ? `/${max}` : ""}`,
+        station.id === selected?.id,
+        `href="/主菜单/逃离塔科夫/藏身处/${esc(station.slug)}" data-link`,
+        listIcon(station.image),
+      );
+    }),
+  ].join("");
   if (!selected) {
-    return `<div class="hideout-layout"><aside class="hideout-side">${side}</aside><div class="hideout-main">${summaryHtml()}<p class="wiki-note">选一个设施查看这一级的材料和配方。</p></div></div>`;
+    return listFrame({
+      side,
+      meta: `共 ${stations.length} 个`,
+      search: { id: "hideout-find", value: hideoutQuery, placeholder: "搜索设施", label: "搜索设施" },
+      panel: `<div class="tarkov-list-pad">${summaryHtml()}<p class="wiki-note">选一个设施查看这一级的材料和配方。</p></div>`,
+    });
   }
   const current = currentOf(selected);
   const max = maxOf(selected);
@@ -201,23 +219,21 @@ function render(selected: Station | null, crafts: Craft[]) {
   const bonuses = (level?.bonuses || []).map((item) => `<li>${esc(item)}</li>`).join("");
   const craftRows = crafts.map((craft) => {
     const locked = craft.level > current;
-    return `<tr class="${locked ? "locked" : ""}"><td>${craft.product ? chip(craft.product) : "—"}</td><td>${craft.needs.map(chip).join("") || "—"}</td><td>Lv.${craft.level || "—"}</td><td>${craft.duration ? clock(craft.duration) : "—"}</td></tr>`;
+    return `<tr class="${locked ? "locked" : ""}"><td>${craft.product ? chip(craft.product) : "—"}</td><td>${craft.needs.map(chip).join("") || "—"}</td><td class="num">Lv.${craft.level || "—"}</td><td class="num">${craft.duration ? clock(craft.duration) : "—"}</td></tr>`;
   }).join("");
-  return `
-    <div class="hideout-layout">
-      <aside class="hideout-side">${side}</aside>
-      <div class="hideout-main">
-        <header class="wiki-hero">${selected.image ? `<img class="wiki-hero-img" src="${esc(selected.image)}" alt="" />` : ""}<div><span class="wiki-badge">藏身处</span><h1>${esc(selected.name)}</h1><p>${current ? `已建到 Lv.${current}` : "尚未建造"}${max ? ` / ${max}` : ""} · <a href="/主菜单/逃离塔科夫/藏身处" data-link>全部材料合计</a></p></div></header>
-        <p class="wiki-actions">
-          <button type="button" data-hideout-step="-1" ${current <= floorOf(selected) ? "disabled" : ""}>降一级</button>
-          <button type="button" data-hideout-step="1" ${current >= max ? "disabled" : ""}>升一级</button>
-        </p>
-        <div class="wiki-levels">${chips}</div>
-        <section class="wiki-block"><h2>Lv.${shown} 升级要求</h2>${prereq ? `<ul class="wiki-lines">${prereq}</ul>` : `<p class="wiki-note">无设施前置。</p>`}${materials ? `<div class="wiki-chips">${materials}</div>` : `<p class="wiki-note">这一级没有列出材料。</p>`}</section>
-        ${bonuses ? `<section class="wiki-block"><h2>效果</h2><ul class="wiki-lines">${bonuses}</ul></section>` : ""}
-        ${craftRows ? `<section class="wiki-block"><h2>制作</h2><table class="wiki-table"><thead><tr><th>产物</th><th>材料</th><th>模块</th><th>时长</th></tr></thead><tbody>${craftRows}</tbody></table></section>` : ""}
-      </div>
-    </div>`;
+  const filters = pending ? "" : `<div class="tarkov-list-kinds"><button type="button" data-hideout-step="-1" ${current <= floorOf(selected) ? "disabled" : ""}>降一级</button><button type="button" data-hideout-step="1" ${current >= max ? "disabled" : ""}>升一级</button>${chips}</div>`;
+  const panel = pending ? spin("正在读取藏身处") : `<div class="tarkov-list-pad">
+    <section class="wiki-block"><h2>Lv.${shown} 升级要求</h2>${prereq ? `<ul class="wiki-lines">${prereq}</ul>` : `<p class="wiki-note">无设施前置。</p>`}${materials ? `<div class="wiki-chips">${materials}</div>` : `<p class="wiki-note">这一级没有列出材料。</p>`}</section>
+    ${bonuses ? `<section class="wiki-block"><h2>效果</h2><ul class="wiki-lines">${bonuses}</ul></section>` : ""}
+    ${craftRows ? `<section class="wiki-block"><h2>制作</h2><table class="tarkov-list-table"><thead><tr><th>产物</th><th>材料</th><th class="num">模块</th><th class="num">时长</th></tr></thead><tbody>${craftRows}</tbody></table></section>` : ""}
+  </div>`;
+  return listFrame({
+    side,
+    meta: `共 ${stations.length} 个 · ${esc(selected.name)} · ${current ? `Lv.${current}` : "尚未建造"}${max ? ` / ${max}` : ""}`,
+    filters,
+    search: { id: "hideout-find", value: hideoutQuery, placeholder: "搜索设施", label: "搜索设施" },
+    panel,
+  });
 }
 
 async function loadCrafts(station: Station) {
@@ -232,17 +248,58 @@ async function loadCrafts(station: Station) {
   }).sort((a, b) => a.level - b.level);
 }
 
-function bind(host: HTMLElement, station: Station | null) {
+const HIDEOUT_HREF = "/主菜单/逃离塔科夫/藏身处";
+
+function draw(host: HTMLElement, selected: Station | null, crafts: Craft[], pending = false) {
+  repaintList(host, "hideout-find", () => {
+    host.innerHTML = render(selected, crafts, pending);
+  });
+  bind(host, selected, crafts);
+}
+
+async function showSelection(slug: string) {
+  const token = ++seq;
+  const host = document.querySelector<HTMLElement>("#hideout");
+  if (!host) return;
+  const selected = slug ? stations.find((item) => item.slug === slug || item.id === slug) || null : null;
+  if (selected && previewKey !== selected.id) {
+    preview = Math.min(maxOf(selected), currentOf(selected) + 1);
+    previewKey = selected.id;
+  }
+  if (!selected) {
+    draw(host, null, []);
+    return;
+  }
+  draw(host, selected, [], true);
+  const crafts = await loadCrafts(selected);
+  if (token !== seq || !document.querySelector("#hideout")) return;
+  const live = document.querySelector<HTMLElement>("#hideout");
+  if (!live) return;
+  draw(live, selected, crafts);
+}
+
+export function openHideoutList(href: string) {
+  if (!stations.length) return false;
+  const hit = stayOnList(document.querySelector("#hideout"), href, HIDEOUT_HREF);
+  if (!hit) return false;
+  if (!hit.same) void showSelection(hit.slug);
+  return true;
+}
+
+function bind(host: HTMLElement, station: Station | null, crafts: Craft[]) {
+  bindListSearch(host, "hideout-find", (value) => {
+    hideoutQuery = value.trim();
+    draw(host, station, crafts);
+  });
   host.querySelectorAll<HTMLButtonElement>("[data-hideout-preview]").forEach((button) => {
     button.addEventListener("click", () => {
       preview = Number(button.dataset.hideoutPreview) || 0;
       previewKey = station?.id || "";
       const live = document.querySelector<HTMLElement>("#hideout");
       if (!live || !station) return;
-      void loadCrafts(station).then((crafts) => {
+      void loadCrafts(station).then((nextCrafts) => {
         if (!document.querySelector("#hideout")) return;
-        live.innerHTML = render(station, crafts);
-        bind(live, station);
+        draw(live, station, nextCrafts);
       });
     });
   });
@@ -269,8 +326,7 @@ async function saveLevel(station: Station, level: number) {
     const crafts = await loadCrafts(station);
     const live = document.querySelector<HTMLElement>("#hideout");
     if (!live) return;
-    live.innerHTML = render(station, crafts);
-    bind(live, station);
+    draw(live, station, crafts);
   } catch (error) {
     const live = document.querySelector<HTMLElement>("#hideout");
     if (!live) return;
@@ -278,7 +334,7 @@ async function saveLevel(station: Station, level: number) {
     const note = document.createElement("p");
     note.className = "wiki-note";
     note.textContent = message;
-    live.querySelector(".hideout-main")?.prepend(note);
+    live.querySelector(".tarkov-list-main")?.prepend(note);
   }
 }
 
@@ -286,7 +342,7 @@ export async function mountHideout(slug: string) {
   const token = ++seq;
   const host = document.querySelector<HTMLElement>("#hideout");
   if (!host) return;
-  host.innerHTML = `<p class="wiki-note">正在读取藏身处…</p>`;
+  listBusy(host, "正在读取藏身处");
   try {
     const [catalog, progress, profile] = await Promise.all([
       invoke<{ items?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/hideout" }),
@@ -314,8 +370,7 @@ export async function mountHideout(slug: string) {
     if (token !== seq) return;
     const live = document.querySelector<HTMLElement>("#hideout");
     if (!live) return;
-    live.innerHTML = render(selected, crafts);
-    bind(live, selected);
+    draw(live, selected, crafts);
   } catch (error) {
     if (token !== seq) return;
     const live = document.querySelector("#hideout");

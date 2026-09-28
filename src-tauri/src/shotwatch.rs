@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -49,6 +50,8 @@ static STATE: Mutex<ShotState> = Mutex::new(ShotState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShotSettings {
+    #[serde(default = "default_on")]
+    pub sync_enabled: bool,
     #[serde(default)]
     pub prune_enabled: bool,
     #[serde(default = "default_keep")]
@@ -56,7 +59,13 @@ pub struct ShotSettings {
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
     #[serde(default)]
-    pub offline_map: String,
+    pub auto_enabled: bool,
+    #[serde(default = "default_auto_secs")]
+    pub auto_secs: u32,
+}
+
+fn default_on() -> bool {
+    true
 }
 
 fn default_keep() -> u32 {
@@ -67,23 +76,32 @@ fn default_hotkey() -> String {
     "PrintScreen".into()
 }
 
+fn default_auto_secs() -> u32 {
+    5
+}
+
 impl Default for ShotSettings {
     fn default() -> Self {
         Self {
+            sync_enabled: true,
             prune_enabled: false,
             keep_max: 20,
             hotkey: default_hotkey(),
-            offline_map: String::new(),
+            auto_enabled: false,
+            auto_secs: 5,
         }
     }
 }
 
 static SETTINGS: Mutex<ShotSettings> = Mutex::new(ShotSettings {
+    sync_enabled: true,
     prune_enabled: false,
     keep_max: 20,
     hotkey: String::new(),
-    offline_map: String::new(),
+    auto_enabled: false,
+    auto_secs: 5,
 });
+static CAPTURING: AtomicBool = AtomicBool::new(false);
 
 pub fn state() -> ShotState {
     STATE.lock().expect("shot-watch").clone()
@@ -95,13 +113,12 @@ pub fn settings(app: &AppHandle) -> ShotSettings {
     loaded
 }
 
+pub fn set_capturing(on: bool) {
+    CAPTURING.store(on, Ordering::Relaxed);
+}
+
 pub fn save_settings(app: &AppHandle, next: ShotSettings) -> Result<ShotSettings, String> {
-    let saved = ShotSettings {
-        prune_enabled: next.prune_enabled,
-        keep_max: clamp_keep(next.keep_max),
-        hotkey: normalize_hotkey(&next.hotkey),
-        offline_map: next.offline_map.trim().to_string(),
-    };
+    let saved = normalize_settings(next);
     let path = settings_file(app)?;
     let text = serde_json::to_string_pretty(&saved).map_err(|err| err.to_string())?;
     fs::write(path, text).map_err(|err| err.to_string())?;
@@ -118,20 +135,57 @@ pub fn spawn(app: AppHandle) {
 fn watch(app: AppHandle) {
     let mut seen = ShotState::empty();
     let mut held = false;
+    let mut sync_was = false;
     let mut last_scan = Instant::now() - Duration::from_secs(2);
+    let mut last_tap: Option<Instant> = None;
+    let mut boost: Option<Instant> = None;
     loop {
-        let poke = hotkey_edge(&mut held);
-        if poke {
-            let _ = app.emit("shot-poke", ());
-        }
-        if poke || last_scan.elapsed() >= Duration::from_secs(1) {
-            last_scan = Instant::now();
-            let next = read_state(&app);
-            if next != seen {
-                seen = next.clone();
-                *STATE.lock().expect("shot-watch") = next.clone();
-                let _ = app.emit("shot-fix", next);
+        let settings = SETTINGS.lock().expect("shot-settings").clone();
+        if settings.sync_enabled {
+            if !sync_was {
+                last_scan = Instant::now() - Duration::from_secs(2);
             }
+            sync_was = true;
+            let poke = hotkey_edge(&mut held);
+            let boost_due = boost.is_some_and(|at| at.elapsed() >= Duration::from_millis(400));
+            if poke {
+                let _ = app.emit("shot-poke", ());
+            }
+            if poke || boost_due || last_scan.elapsed() >= Duration::from_secs(1) {
+                if boost_due {
+                    boost = None;
+                }
+                last_scan = Instant::now();
+                let next = read_state(&app);
+                if next != seen {
+                    seen = next.clone();
+                    *STATE.lock().expect("shot-watch") = next.clone();
+                    let _ = app.emit("shot-fix", next);
+                }
+            }
+        } else {
+            sync_was = false;
+            held = false;
+            last_tap = None;
+        }
+        if settings.sync_enabled && settings.auto_enabled {
+            if !crate::logwatch::raid_snapshot().in_raid {
+                last_tap = None;
+            } else {
+                let interval = Duration::from_secs(settings.auto_secs as u64);
+                let due = last_tap.is_none_or(|at| at.elapsed() >= interval);
+                if due && !CAPTURING.load(Ordering::Relaxed) && game_foreground() {
+                    if hotkey_reserved(&settings.hotkey) {
+                        last_tap = Some(Instant::now());
+                    } else if let Some(vk) = vk_of(&settings.hotkey) {
+                        tap_key(vk);
+                        last_tap = Some(Instant::now());
+                        boost = Some(Instant::now());
+                    }
+                }
+            }
+        } else {
+            last_tap = None;
         }
         thread::sleep(Duration::from_millis(30));
     }
@@ -151,7 +205,7 @@ fn read_state(app: &AppHandle) -> ShotState {
         return missing;
     }
     let settings = SETTINGS.lock().expect("shot-settings").clone();
-    if settings.prune_enabled {
+    if settings.sync_enabled && settings.prune_enabled {
         prune_old(path, settings.keep_max);
     }
     let Some((name, modified_ms)) = latest_screenshot(path) else {
@@ -180,10 +234,10 @@ struct Pos {
 }
 
 fn latest_screenshot(dir: &Path) -> Option<(String, u64)> {
-    let mut dated: Option<String> = None;
-    let mut any: Option<String> = None;
+    let mut dated: Option<(String, u64)> = None;
+    let mut any: Option<(String, u64)> = None;
     for entry in fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
+        let Ok(entry) = entry else { continue };
         if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
             continue;
         }
@@ -191,20 +245,27 @@ fn latest_screenshot(dir: &Path) -> Option<(String, u64)> {
         if !is_image(&name) {
             continue;
         }
-        if any.as_ref().map(|cur| name.as_str() > cur.as_str()).unwrap_or(true) {
-            any = Some(name.clone());
+        let modified_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(to_millis)
+            .unwrap_or(0);
+        if newer(&any, &name, modified_ms) {
+            any = Some((name.clone(), modified_ms));
         }
-        if is_dated(&name) && dated.as_ref().map(|cur| name.as_str() > cur.as_str()).unwrap_or(true) {
-            dated = Some(name);
+        if is_dated(&name) && newer(&dated, &name, modified_ms) {
+            dated = Some((name, modified_ms));
         }
     }
-    let name = dated.or(any)?;
-    let modified_ms = fs::metadata(dir.join(&name))
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(to_millis)
-        .unwrap_or(0);
-    Some((name, modified_ms))
+    dated.or(any)
+}
+
+fn newer(current: &Option<(String, u64)>, name: &str, modified_ms: u64) -> bool {
+    match current {
+        None => true,
+        Some((cur, at)) => modified_ms > *at || (modified_ms == *at && name > cur.as_str()),
+    }
 }
 
 fn to_millis(time: SystemTime) -> Option<u64> {
@@ -330,14 +391,81 @@ fn settings_file(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn read_settings(app: &AppHandle) -> ShotSettings {
     let Ok(path) = settings_file(app) else { return ShotSettings::default() };
-    fs::read_to_string(path)
+    let loaded = fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    normalize_settings(loaded)
+}
+
+fn normalize_settings(next: ShotSettings) -> ShotSettings {
+    ShotSettings {
+        sync_enabled: next.sync_enabled,
+        prune_enabled: next.prune_enabled,
+        keep_max: clamp_keep(next.keep_max),
+        hotkey: normalize_hotkey(&next.hotkey),
+        auto_enabled: next.auto_enabled,
+        auto_secs: clamp_auto(next.auto_secs),
+    }
 }
 
 fn clamp_keep(value: u32) -> u32 {
     value.clamp(1, 200)
+}
+
+fn clamp_auto(value: u32) -> u32 {
+    value.clamp(2, 120)
+}
+
+fn conflicts(hotkey: &str, reserved: &[String]) -> bool {
+    let key = normalize_hotkey(hotkey);
+    reserved.iter().any(|item| {
+        let item = item.trim();
+        !item.is_empty() && normalize_hotkey(item).eq_ignore_ascii_case(&key)
+    })
+}
+
+fn hotkey_reserved(hotkey: &str) -> bool {
+    let mut reserved = Vec::new();
+    let miao = crate::miaomiao::get();
+    if miao.visual_enabled {
+        for scheme in &miao.schemes {
+            reserved.push(scheme.visual.hotkey.clone());
+        }
+    }
+    if miao.fitness.enabled {
+        reserved.push(miao.fitness.hotkey.clone());
+    }
+    let overlay = crate::overlay::get();
+    if overlay.hotkey_enabled {
+        reserved.push(overlay.hotkey);
+    }
+    conflicts(hotkey, &reserved)
+}
+
+fn game_foreground() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd == 0 {
+            return false;
+        }
+        let mut buf = [0u16; 64];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            return false;
+        }
+        String::from_utf16_lossy(&buf[..len as usize]) == "Escape from Tarkov"
+    }
+}
+
+fn tap_key(vk: i32) {
+    let vk = vk as u8;
+    let (scan, flags) = if vk == 0x2C { (0x37u8, 0x0001u32) } else { (0, 0) };
+    unsafe {
+        keybd_event(vk, scan, flags, 0);
+        thread::sleep(Duration::from_millis(40));
+        keybd_event(vk, scan, flags | 0x0002, 0);
+    }
 }
 
 fn normalize_hotkey(raw: &str) -> String {
@@ -352,24 +480,30 @@ fn normalize_hotkey(raw: &str) -> String {
     if vk_of(&upper).is_some() { upper } else { default_hotkey() }
 }
 
-fn names_to_prune(names: &[String], keep_max: u32) -> Vec<String> {
-    let mut dated: Vec<&String> = names.iter().filter(|name| is_image(name) && is_dated(name)).collect();
+fn names_to_prune(files: &[(String, u64)], keep_max: u32) -> Vec<String> {
+    let mut dated: Vec<&(String, u64)> = files.iter().filter(|(name, _)| is_image(name) && is_dated(name)).collect();
     let cap = clamp_keep(keep_max) as usize;
     if dated.len() <= cap {
         return Vec::new();
     }
-    dated.sort_by(|a, b| b.cmp(a));
-    dated.into_iter().skip(cap).cloned().take(40).collect()
+    dated.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    dated.into_iter().skip(cap).take(40).map(|(name, _)| name.clone()).collect()
 }
 
 fn prune_old(dir: &Path, keep_max: u32) {
     let Ok(entries) = fs::read_dir(dir) else { return };
-    let names: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false))
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
+    let files: Vec<(String, u64)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok()).and_then(to_millis).unwrap_or(0);
+            Some((name, modified))
+        })
         .collect();
-    for name in names_to_prune(&names, keep_max) {
+    for name in names_to_prune(&files, keep_max) {
         let _ = fs::remove_file(dir.join(name));
     }
 }
@@ -413,6 +547,9 @@ fn vk_of(name: &str) -> Option<i32> {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
+    fn GetForegroundWindow() -> isize;
+    fn GetWindowTextW(hwnd: isize, text: *mut u16, max: i32) -> i32;
+    fn keybd_event(vk: u8, scan: u8, flags: u32, extra: usize);
 }
 
 #[cfg(test)]
@@ -445,9 +582,88 @@ mod tests {
 
     #[test]
     fn prunes_oldest_dated_shots() {
-        let names: Vec<String> = (1..=5).map(|n| format!("2026-01-0{n}[12-00]_1, 2, 3.png")).collect();
-        let drop = names_to_prune(&names, 2);
+        let files: Vec<(String, u64)> = (1..=5).map(|n| (format!("2026-01-0{n}[12-00]_1, 2, 3.png"), n)).collect();
+        let drop = names_to_prune(&files, 2);
         assert_eq!(drop.len(), 3);
         assert!(drop.iter().all(|name| !name.contains("2026-01-04") && !name.contains("2026-01-05")));
+    }
+
+    #[test]
+    fn keeps_newer_shot_when_name_sorts_earlier() {
+        let files = vec![
+            ("2026-01-01[12-00]_900, 1, 1.png".to_string(), 10),
+            ("2026-01-01[12-00]_100, 1, 1.png".to_string(), 20),
+        ];
+        assert_eq!(
+            names_to_prune(&files, 1),
+            vec!["2026-01-01[12-00]_900, 1, 1.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn old_file_keeps_sync_on_and_drops_offline_map() {
+        let parsed: ShotSettings = serde_json::from_str(
+            r#"{"pruneEnabled":true,"keepMax":12,"hotkey":"PrintScreen","offlineMap":"customs"}"#,
+        )
+        .expect("settings");
+        let saved = normalize_settings(parsed);
+        assert!(saved.sync_enabled);
+        assert!(saved.prune_enabled);
+        assert_eq!(saved.keep_max, 12);
+        assert!(!saved.auto_enabled);
+        assert_eq!(saved.auto_secs, 5);
+        assert_eq!(saved.hotkey, "PrintScreen");
+        let paused: ShotSettings = serde_json::from_str(
+            r#"{"syncEnabled":false,"pruneEnabled":true,"autoEnabled":true,"autoSecs":1,"hotkey":"F8"}"#,
+        )
+        .expect("paused");
+        let paused = normalize_settings(paused);
+        assert!(!paused.sync_enabled);
+        assert!(paused.prune_enabled);
+        assert!(paused.auto_enabled);
+        assert_eq!(paused.auto_secs, 2);
+        assert_eq!(paused.hotkey, "F8");
+    }
+
+    #[test]
+    fn clamps_auto_interval() {
+        assert_eq!(clamp_auto(0), 2);
+        assert_eq!(clamp_auto(5), 5);
+        assert_eq!(clamp_auto(500), 120);
+    }
+
+    #[test]
+    fn blocks_keys_used_by_other_tools() {
+        let reserved = vec!["F2".into(), "F9".into(), "M".into()];
+        assert!(conflicts("f2", &reserved));
+        assert!(conflicts("m", &reserved));
+        assert!(!conflicts("PrintScreen", &reserved));
+        assert!(!conflicts("F8", &reserved));
+    }
+
+    #[test]
+    fn picks_screenshot_by_mtime() {
+        let dir = std::env::temp_dir().join(format!("zhange-shot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp");
+        let older_name = "2026-01-01[12-00]_90, 1, 1_0, 0, 0, 1_75.png";
+        let newer_name = "2026-01-01[12-00]_10, 1, 1_0, 0, 0, 1_75.png";
+        fs::write(dir.join(older_name), b"old").expect("write");
+        fs::write(dir.join(newer_name), b"new").expect("write");
+        fs::File::options()
+            .write(true)
+            .open(dir.join(older_name))
+            .expect("open")
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000))
+            .expect("mtime");
+        fs::File::options()
+            .write(true)
+            .open(dir.join(newer_name))
+            .expect("open")
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000))
+            .expect("mtime");
+        let picked = latest_screenshot(&dir).expect("latest");
+        assert_eq!(picked.0, newer_name);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

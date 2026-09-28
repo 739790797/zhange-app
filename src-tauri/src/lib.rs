@@ -52,6 +52,11 @@ fn shot_settings_set(app: tauri::AppHandle, settings: shotwatch::ShotSettings) -
 }
 
 #[tauri::command]
+fn shot_capture_set(capturing: bool) {
+    shotwatch::set_capturing(capturing);
+}
+
+#[tauri::command]
 async fn site_session() -> Result<site::SiteUser, String> {
     site::restore().await
 }
@@ -210,6 +215,7 @@ pub fn run() {
             shot_state,
             shot_settings_get,
             shot_settings_set,
+            shot_capture_set,
             app_usage,
             paths_get,
             paths_set,
