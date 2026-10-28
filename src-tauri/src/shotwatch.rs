@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+const MAX_SCREENSHOT_DIRECTORY_ENTRIES: usize = 4096;
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShotState {
@@ -132,9 +134,11 @@ pub fn save_settings(app: &AppHandle, mut next: ShotSettings) -> Result<ShotSett
     let saved = normalize_settings(next);
     let path = settings_file(app)?;
     let text = serde_json::to_string_pretty(&saved).map_err(|err| err.to_string())?;
-    fs::write(path, text).map_err(|err| err.to_string())?;
+    crate::persist::atomic_write(&path, text.as_bytes())?;
     *SETTINGS.lock().expect("shot-settings") = saved.clone();
-    Ok(present(saved))
+    let shown = present(saved);
+    let _ = app.emit("shot-settings-changed", shown.clone());
+    Ok(shown)
 }
 
 pub fn spawn(app: AppHandle) {
@@ -159,13 +163,19 @@ fn watch(app: AppHandle) {
         if game_checked.elapsed() >= Duration::from_secs(1) {
             game_checked = Instant::now();
             let path = control_path();
-            let mtime = path.as_ref().and_then(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
+            let mtime = path
+                .as_ref()
+                .and_then(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
             if path.is_none() || mtime != game_mtime {
                 game_mtime = mtime;
-                game_bind = path.and_then(|path| fs::read_to_string(path).ok()).and_then(|text| screenshot_bind(&text));
+                game_bind = path
+                    .and_then(|path| fs::read_to_string(path).ok())
+                    .and_then(|text| screenshot_bind(&text));
             }
         }
-        let bind = game_bind.clone().unwrap_or_else(|| fallback_bind(&settings.hotkey));
+        let bind = game_bind
+            .clone()
+            .unwrap_or_else(|| fallback_bind(&settings.hotkey));
         let sig = format!("{}|{}", bind.hotkey, bind.game_name);
         if sig != bind_sig {
             held = false;
@@ -194,9 +204,17 @@ fn watch(app: AppHandle) {
                 }
             }
         } else {
-            sync_was = false;
+            if sync_was {
+                sync_was = false;
+                let cleared = ShotState::empty();
+                if cleared != seen {
+                    *STATE.lock().expect("shot-watch") = cleared.clone();
+                    let _ = app.emit("shot-fix", cleared);
+                }
+            }
             held = false;
             last_tap = None;
+            seen = ShotState::empty();
         }
         if settings.sync_enabled && settings.auto_enabled {
             if !crate::logwatch::raid_snapshot().in_raid {
@@ -239,10 +257,17 @@ fn read_state(app: &AppHandle) -> ShotState {
         return missing;
     }
     let settings = SETTINGS.lock().expect("shot-settings").clone();
-    if settings.sync_enabled && settings.prune_enabled {
-        prune_old(path, settings.keep_max);
-    }
-    let Some((name, modified_ms)) = latest_screenshot(path) else {
+    let Some(files) = scan_and_prune_screenshots(
+        path,
+        settings.keep_max,
+        settings.sync_enabled && settings.prune_enabled,
+        MAX_SCREENSHOT_DIRECTORY_ENTRIES,
+    ) else {
+        let mut incomplete = ShotState::empty();
+        incomplete.bound = true;
+        return incomplete;
+    };
+    let Some((name, modified_ms)) = latest_screenshot(&files) else {
         let mut empty = ShotState::empty();
         empty.bound = true;
         return empty;
@@ -267,32 +292,57 @@ struct Pos {
     yaw: Option<f64>,
 }
 
-fn latest_screenshot(dir: &Path) -> Option<(String, u64)> {
-    let mut dated: Option<(String, u64)> = None;
-    let mut any: Option<(String, u64)> = None;
-    for entry in fs::read_dir(dir).ok()? {
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+fn scan_screenshot_files(dir: &Path, entry_budget: usize) -> Option<Vec<(String, u64)>> {
+    let entries = fs::read_dir(dir).ok()?;
+    let mut files = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= entry_budget {
+            return None;
+        }
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_file() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name().to_string_lossy().into_owned();
         if !is_image(&name) {
             continue;
         }
         let modified_ms = entry
             .metadata()
+            .ok()?
+            .modified()
             .ok()
-            .and_then(|meta| meta.modified().ok())
             .and_then(to_millis)
             .unwrap_or(0);
-        if newer(&any, &name, modified_ms) {
-            any = Some((name.clone(), modified_ms));
+        files.push((name, modified_ms));
+    }
+    Some(files)
+}
+
+fn scan_and_prune_screenshots(
+    dir: &Path,
+    keep_max: u32,
+    prune_enabled: bool,
+    entry_budget: usize,
+) -> Option<Vec<(String, u64)>> {
+    let files = scan_screenshot_files(dir, entry_budget)?;
+    if prune_enabled {
+        prune_old(dir, keep_max, &files);
+    }
+    Some(files)
+}
+
+fn latest_screenshot(files: &[(String, u64)]) -> Option<(String, u64)> {
+    let mut any: Option<(String, u64)> = None;
+    for (name, modified_ms) in files {
+        if !is_image(&name) {
+            continue;
         }
-        if is_dated(&name) && newer(&dated, &name, modified_ms) {
-            dated = Some((name, modified_ms));
+        if newer(&any, name, *modified_ms) {
+            any = Some((name.clone(), *modified_ms));
         }
     }
-    dated.or(any)
+    any
 }
 
 fn newer(current: &Option<(String, u64)>, name: &str, modified_ms: u64) -> bool {
@@ -303,12 +353,18 @@ fn newer(current: &Option<(String, u64)>, name: &str, modified_ms: u64) -> bool 
 }
 
 fn to_millis(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH).ok().map(|span| span.as_millis() as u64)
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|span| span.as_millis() as u64)
 }
 
 fn is_image(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".bmp") || lower.ends_with(".webp")
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".bmp")
+        || lower.ends_with(".webp")
 }
 
 fn is_dated(name: &str) -> bool {
@@ -324,7 +380,13 @@ fn is_dated(name: &str) -> bool {
 fn parse_screenshot_name(file_name: &str) -> Option<Pos> {
     let base = file_name
         .rsplit_once('.')
-        .map(|(stem, ext)| if is_image(&format!(".{ext}")) { stem } else { file_name })
+        .map(|(stem, ext)| {
+            if is_image(&format!(".{ext}")) {
+                stem
+            } else {
+                file_name
+            }
+        })
         .unwrap_or(file_name)
         .trim();
     let rest = dated_rest(base)?;
@@ -353,15 +415,34 @@ fn parse_screenshot_name(file_name: &str) -> Option<Pos> {
 
 fn dated_rest(base: &str) -> Option<&str> {
     let bytes = base.as_bytes();
-    if !is_dated(base) || bytes.len() < 12 || bytes[10] != b'[' {
+    if !is_dated(base)
+        || bytes.len() < 18
+        || bytes[10] != b'['
+        || !bytes[11..13].iter().all(|digit| digit.is_ascii_digit())
+        || bytes[13] != b'-'
+        || !bytes[14..16].iter().all(|digit| digit.is_ascii_digit())
+        || bytes[16] != b']'
+        || bytes[17] != b'_'
+    {
         return None;
     }
-    let close = base[11..].find(']')?;
-    let after = 12 + close;
-    if bytes.get(after) != Some(&b'_') {
+    let year = base[0..4].parse::<u32>().ok()?;
+    let month = base[5..7].parse::<u32>().ok()?;
+    let day = base[8..10].parse::<u32>().ok()?;
+    let hour = base[11..13].parse::<u32>().ok()?;
+    let minute = base[14..16].parse::<u32>().ok()?;
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day == 0 || day > days_in_month || hour > 23 || minute > 59 {
         return None;
     }
-    Some(&base[after + 1..])
+    Some(&base[18..])
 }
 
 fn strip_copy_suffix(rest: &str) -> &str {
@@ -369,8 +450,13 @@ fn strip_copy_suffix(rest: &str) -> &str {
     if !trimmed.ends_with(')') {
         return trimmed;
     }
-    let Some(open) = trimmed.rfind(" (") else { return trimmed };
-    if trimmed[open + 2..trimmed.len() - 1].chars().all(|ch| ch.is_ascii_digit()) {
+    let Some(open) = trimmed.rfind(" (") else {
+        return trimmed;
+    };
+    if trimmed[open + 2..trimmed.len() - 1]
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+    {
         return trimmed[..open].trim_end();
     }
     trimmed
@@ -404,7 +490,11 @@ fn numbers(part: &str) -> Vec<f64> {
         } else {
             index = start + 1;
         }
-        while index < bytes.len() && !bytes[index].is_ascii_digit() && bytes[index] != b'-' && bytes[index] != b'+' {
+        while index < bytes.len()
+            && !bytes[index].is_ascii_digit()
+            && bytes[index] != b'-'
+            && bytes[index] != b'+'
+        {
             index += 1;
         }
     }
@@ -424,7 +514,9 @@ fn settings_file(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn read_settings(app: &AppHandle) -> ShotSettings {
-    let Ok(path) = settings_file(app) else { return ShotSettings::default() };
+    let Ok(path) = settings_file(app) else {
+        return ShotSettings::default();
+    };
     let loaded = fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -487,11 +579,17 @@ fn read_game_bind() -> Option<ShotBind> {
 fn screenshot_bind(text: &str) -> Option<ShotBind> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let bindings = value.get("keyBindings")?.as_array()?;
-    let entry = bindings.iter().find(|item| item.get("keyName").and_then(|name| name.as_str()) == Some("MakeScreenshot"))?;
+    let entry = bindings.iter().find(|item| {
+        item.get("keyName").and_then(|name| name.as_str()) == Some("MakeScreenshot")
+    })?;
     let variants = entry.get("variants")?.as_array()?;
     for variant in variants {
         let codes = variant.get("keyCode")?.as_array()?;
-        let names: Vec<&str> = codes.iter().filter_map(|code| code.as_str()).filter(|code| !code.is_empty()).collect();
+        let names: Vec<&str> = codes
+            .iter()
+            .filter_map(|code| code.as_str())
+            .filter(|code| !code.is_empty())
+            .collect();
         if names.is_empty() {
             continue;
         }
@@ -523,8 +621,17 @@ fn bind_from_codes(names: &[&str]) -> Option<ShotBind> {
     if triggers.is_empty() {
         return None;
     }
-    let game_name = pieces.iter().map(|piece| piece.game_name.as_str()).collect::<Vec<_>>().join(" + ");
-    Some(ShotBind { modifiers, triggers, hotkey, game_name })
+    let game_name = pieces
+        .iter()
+        .map(|piece| piece.game_name.as_str())
+        .collect::<Vec<_>>()
+        .join(" + ");
+    Some(ShotBind {
+        modifiers,
+        triggers,
+        hotkey,
+        game_name,
+    })
 }
 
 fn fallback_bind(hotkey: &str) -> ShotBind {
@@ -563,7 +670,12 @@ fn unity_key(raw: &str) -> Option<UnityKey> {
         if let Ok(digit) = rest.parse::<u8>() {
             if digit <= 9 {
                 let ch = char::from(b'0' + digit).to_string();
-                return Some(UnityKey { vk: ch.as_bytes()[0] as i32, modifier: false, hotkey: ch.clone(), game_name: ch });
+                return Some(UnityKey {
+                    vk: ch.as_bytes()[0] as i32,
+                    modifier: false,
+                    hotkey: ch.clone(),
+                    game_name: ch,
+                });
             }
         }
     }
@@ -571,7 +683,12 @@ fn unity_key(raw: &str) -> Option<UnityKey> {
         if let Ok(number) = rest.parse::<i32>() {
             if (1..=24).contains(&number) {
                 let label = format!("F{number}");
-                return Some(UnityKey { vk: 0x70 + number - 1, modifier: false, hotkey: label.clone(), game_name: label });
+                return Some(UnityKey {
+                    vk: 0x70 + number - 1,
+                    modifier: false,
+                    hotkey: label.clone(),
+                    game_name: label,
+                });
             }
         }
     }
@@ -579,7 +696,12 @@ fn unity_key(raw: &str) -> Option<UnityKey> {
         let ch = name.chars().next()?;
         if ch.is_ascii_alphabetic() {
             let upper = ch.to_ascii_uppercase().to_string();
-            return Some(UnityKey { vk: upper.as_bytes()[0] as i32, modifier: false, hotkey: upper.clone(), game_name: upper });
+            return Some(UnityKey {
+                vk: upper.as_bytes()[0] as i32,
+                modifier: false,
+                hotkey: upper.clone(),
+                game_name: upper,
+            });
         }
     }
     let (vk, modifier, hotkey, game_name) = match name {
@@ -614,7 +736,12 @@ fn unity_key(raw: &str) -> Option<UnityKey> {
         "RightArrow" => (0x27, false, "Right", "Right"),
         _ => return None,
     };
-    Some(UnityKey { vk, modifier, hotkey: hotkey.into(), game_name: game_name.into() })
+    Some(UnityKey {
+        vk,
+        modifier,
+        hotkey: hotkey.into(),
+        game_name: game_name.into(),
+    })
 }
 
 fn clamp_keep(value: u32) -> u32 {
@@ -649,7 +776,8 @@ fn game_foreground() -> bool {
 }
 
 fn is_game_window(class: &str, title: &str) -> bool {
-    class == "UnityWndClass" && (title.to_ascii_lowercase().contains("tarkov") || title.contains("逃离"))
+    class == "UnityWndClass"
+        && (title.to_ascii_lowercase().contains("tarkov") || title.contains("逃离"))
 }
 
 fn tap_key(vk: i32) {
@@ -662,7 +790,11 @@ fn tap_key(vk: i32) {
         return;
     }
     let vk = vk as u8;
-    let (scan, flags) = if vk == 0x2C { (0x37u8, 0x0001u32) } else { (0, 0) };
+    let (scan, flags) = if vk == 0x2C {
+        (0x37u8, 0x0001u32)
+    } else {
+        (0, 0)
+    };
     unsafe {
         keybd_event(vk, scan, flags, 0);
         thread::sleep(Duration::from_millis(40));
@@ -675,41 +807,81 @@ fn normalize_hotkey(raw: &str) -> String {
     if key.is_empty() {
         return default_hotkey();
     }
-    if key.eq_ignore_ascii_case("printscreen") || key.eq_ignore_ascii_case("print screen") || key.eq_ignore_ascii_case("prtsc") {
+    if key.eq_ignore_ascii_case("printscreen")
+        || key.eq_ignore_ascii_case("print screen")
+        || key.eq_ignore_ascii_case("prtsc")
+    {
         return "PrintScreen".into();
     }
     if let Some(name) = mouse_name(key) {
         return name.into();
     }
     let upper = key.to_ascii_uppercase();
-    if vk_of(&upper).is_some() { upper } else { default_hotkey() }
+    if vk_of(&upper).is_some() {
+        upper
+    } else {
+        default_hotkey()
+    }
 }
 
 fn names_to_prune(files: &[(String, u64)], keep_max: u32) -> Vec<String> {
-    let mut dated: Vec<&(String, u64)> = files.iter().filter(|(name, _)| is_image(name) && is_dated(name)).collect();
+    let mut dated: Vec<&(String, u64)> = files
+        .iter()
+        .filter(|(name, _)| is_tarkov_screenshot_name(name))
+        .collect();
     let cap = clamp_keep(keep_max) as usize;
     if dated.len() <= cap {
         return Vec::new();
     }
     dated.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
-    dated.into_iter().skip(cap).take(40).map(|(name, _)| name.clone()).collect()
+    dated
+        .into_iter()
+        .skip(cap)
+        .take(40)
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
-fn prune_old(dir: &Path, keep_max: u32) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    let files: Vec<(String, u64)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
-                return None;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok()).and_then(to_millis).unwrap_or(0);
-            Some((name, modified))
+fn is_tarkov_screenshot_name(file_name: &str) -> bool {
+    let Some((stem, extension)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    if !is_image(&format!(".{extension}")) {
+        return false;
+    }
+    let Some(rest) = dated_rest(stem) else {
+        return false;
+    };
+    let mut fields = rest.split('_');
+    let Some(position) = fields.next() else {
+        return false;
+    };
+    let Some(rotation) = fields.next() else {
+        return false;
+    };
+    is_numeric_vector(position, 3) && is_numeric_vector(rotation, 4)
+}
+
+fn is_numeric_vector(segment: &str, expected_values: usize) -> bool {
+    let values: Vec<&str> = segment.split(',').collect();
+    values.len() == expected_values
+        && values.iter().all(|value| {
+            value
+                .trim()
+                .parse::<f64>()
+                .is_ok_and(|number| number.is_finite())
         })
-        .collect();
-    for name in names_to_prune(&files, keep_max) {
-        let _ = fs::remove_file(dir.join(name));
+}
+
+fn prune_old(dir: &Path, keep_max: u32, files: &[(String, u64)]) {
+    for name in names_to_prune(files, keep_max) {
+        if !is_tarkov_screenshot_name(&name) {
+            continue;
+        }
+        let path = dir.join(name);
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -729,7 +901,11 @@ fn hotkey_edge(held: &mut bool, bind: &ShotBind) -> bool {
         *held = false;
         return false;
     }
-    let down = bind.modifiers.iter().chain(bind.triggers.iter()).all(|vk| unsafe { GetAsyncKeyState(*vk) < 0 });
+    let down = bind
+        .modifiers
+        .iter()
+        .chain(bind.triggers.iter())
+        .all(|vk| unsafe { GetAsyncKeyState(*vk) < 0 });
     let edge = down && !*held;
     *held = down;
     edge
@@ -819,22 +995,77 @@ mod tests {
 
     #[test]
     fn prunes_oldest_dated_shots() {
-        let files: Vec<(String, u64)> = (1..=5).map(|n| (format!("2026-01-0{n}[12-00]_1, 2, 3.png"), n)).collect();
+        let files: Vec<(String, u64)> = (1..=5)
+            .map(|n| (format!("2026-01-0{n}[12-00]_1, 2, 3_0, 0, 0, 1_75.png"), n))
+            .collect();
         let drop = names_to_prune(&files, 2);
         assert_eq!(drop.len(), 3);
-        assert!(drop.iter().all(|name| !name.contains("2026-01-04") && !name.contains("2026-01-05")));
+        assert!(drop
+            .iter()
+            .all(|name| !name.contains("2026-01-04") && !name.contains("2026-01-05")));
     }
 
     #[test]
     fn keeps_newer_shot_when_name_sorts_earlier() {
         let files = vec![
-            ("2026-01-01[12-00]_900, 1, 1.png".to_string(), 10),
-            ("2026-01-01[12-00]_100, 1, 1.png".to_string(), 20),
+            (
+                "2026-01-01[12-00]_900, 1, 1_0, 0, 0, 1_75.png".to_string(),
+                10,
+            ),
+            (
+                "2026-01-01[12-00]_100, 1, 1_0, 0, 0, 1_75.png".to_string(),
+                20,
+            ),
         ];
         assert_eq!(
             names_to_prune(&files, 1),
-            vec!["2026-01-01[12-00]_900, 1, 1.png".to_string()]
+            vec!["2026-01-01[12-00]_900, 1, 1_0, 0, 0, 1_75.png".to_string()]
         );
+    }
+
+    #[test]
+    fn pruning_ignores_ordinary_or_incomplete_images() {
+        let tarkov_old = "2026-01-01[12-00]_90, 1, 1_0, 0, 0, 1_75.png";
+        let tarkov_new = "2026-01-02[12-00]_10, 1, 1_0, 0, 0, 1_75.png";
+        let files = vec![
+            (tarkov_old.to_string(), 10),
+            (tarkov_new.to_string(), 20),
+            ("2026-01-03[12-00]_vacation.png".to_string(), 30),
+            (
+                "2026-01-04[after-lunch]_1, 2, 3_0, 0, 0, 1.png".to_string(),
+                40,
+            ),
+            ("2026-01-05[12-00]_1, 2, 3.png".to_string(), 50),
+            ("Screenshot_2026-01-06_12-00-00.png".to_string(), 60),
+        ];
+
+        assert_eq!(names_to_prune(&files, 1), vec![tarkov_old.to_string()]);
+        assert!(is_tarkov_screenshot_name(tarkov_old));
+        assert!(!is_tarkov_screenshot_name(
+            "2026-02-30[12-00]_1, 2, 3_0, 0, 0, 1.png"
+        ));
+        assert!(!is_tarkov_screenshot_name(
+            "2026-01-01[24-00]_1, 2, 3_0, 0, 0, 1.png"
+        ));
+    }
+
+    #[test]
+    fn directory_budget_prevents_pruning_a_partial_scan() {
+        let dir = std::env::temp_dir().join(format!("zhange-shot-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp");
+        let old = "2026-01-01[12-00]_90, 1, 1_0, 0, 0, 1_75.png";
+        let new = "2026-01-02[12-00]_10, 1, 1_0, 0, 0, 1_75.png";
+        let ordinary = "holiday.png";
+        fs::write(dir.join(old), b"old").expect("write old");
+        fs::write(dir.join(new), b"new").expect("write new");
+        fs::write(dir.join(ordinary), b"ordinary").expect("write ordinary");
+
+        assert!(scan_and_prune_screenshots(&dir, 1, true, 2).is_none());
+        assert!(dir.join(old).exists());
+        assert!(dir.join(new).exists());
+        assert!(dir.join(ordinary).exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -886,18 +1117,27 @@ mod tests {
         assert!(bind.modifiers.is_empty());
         assert_eq!(bind.hotkey, "Mouse5");
         assert_eq!(bind.game_name, "Mouse 4");
-        let back = screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["Mouse3"]}]}]}"#).expect("back");
+        let back = screenshot_bind(
+            r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["Mouse3"]}]}]}"#,
+        )
+        .expect("back");
         assert_eq!(back.triggers, vec![0x05]);
         assert_eq!(back.hotkey, "Mouse4");
         assert_eq!(back.game_name, "Mouse 3");
-        let print = screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["SysReq"]}]}]}"#).expect("print");
+        let print = screenshot_bind(
+            r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["SysReq"]}]}]}"#,
+        )
+        .expect("print");
         assert_eq!(print.triggers, vec![0x2C]);
         assert_eq!(print.hotkey, "PrintScreen");
         let chord = screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":["P","LeftAlt"]}]}]}"#).expect("chord");
         assert_eq!(chord.modifiers, vec![0xA4]);
         assert_eq!(chord.triggers, vec![b'P' as i32]);
         assert_eq!(chord.game_name, "P + Left Alt");
-        assert!(screenshot_bind(r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":[]}]}]}"#).is_none());
+        assert!(screenshot_bind(
+            r#"{"keyBindings":[{"keyName":"MakeScreenshot","variants":[{"keyCode":[]}]}]}"#
+        )
+        .is_none());
     }
 
     #[test]
@@ -932,8 +1172,38 @@ mod tests {
             .expect("open")
             .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000))
             .expect("mtime");
-        let picked = latest_screenshot(&dir).expect("latest");
+        let files = scan_screenshot_files(&dir, MAX_SCREENSHOT_DIRECTORY_ENTRIES).expect("scan");
+        let picked = latest_screenshot(&files).expect("latest");
         assert_eq!(picked.0, newer_name);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newer_unlocated_screenshot_clears_old_position_candidate() {
+        let dir = std::env::temp_dir().join(format!("zhange-shot-generic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp");
+        let located = "2026-01-01[12-00]_90, 1, 1_0, 0, 0, 1_75.png";
+        let generic = "Screenshot_2026-01-01_12-01-00.png";
+        fs::write(dir.join(located), b"old").expect("write located");
+        fs::write(dir.join(generic), b"new").expect("write generic");
+        fs::File::options()
+            .write(true)
+            .open(dir.join(located))
+            .expect("open located")
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000))
+            .expect("mtime located");
+        fs::File::options()
+            .write(true)
+            .open(dir.join(generic))
+            .expect("open generic")
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000))
+            .expect("mtime generic");
+
+        let files = scan_screenshot_files(&dir, MAX_SCREENSHOT_DIRECTORY_ENTRIES).expect("scan");
+        let picked = latest_screenshot(&files).expect("latest");
+        assert_eq!(picked.0, generic);
+        assert!(parse_screenshot_name(&picked.0).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }

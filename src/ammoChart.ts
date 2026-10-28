@@ -1,3 +1,4 @@
+import { invoke } from "./tauriBridge";
 import { fadeIn, fadeOut } from "./motion";
 import { spin } from "./spinner";
 
@@ -65,7 +66,17 @@ const CALIBER_LABEL: Record<string, string> = {
 const EFFECT = ["无效", "勉强", "扫射", "略好", "有效", "很好", "无视"];
 const EFFECT_BG = ["#6d1010", "#8f2a14", "#a34818", "#a35f16", "#6b7024", "#3d7a2a", "#2f9b32"];
 
-type SortKey = "penetration" | "damage" | "armorDamage" | "fragmentation" | "ricochet" | "accuracy" | "recoil" | "lightBleed" | "heavyBleed" | "speed";
+type SortKey =
+  | "penetration"
+  | "damage"
+  | "armorDamage"
+  | "fragmentation"
+  | "ricochet"
+  | "accuracy"
+  | "recoil"
+  | "lightBleed"
+  | "heavyBleed"
+  | "speed";
 
 const FILTER_KEY = "zhange.guides.tarkov.ammoFilters.v2";
 const COLUMN_HINT: Record<string, string> = {
@@ -85,8 +96,15 @@ const COLUMN_HINT: Record<string, string> = {
   armor: "对 1–6 级护甲的估算效果，不是游戏内实时演算。",
 };
 const TRACER_ZH: Record<string, string> = {
-  red: "红色", green: "绿色", yellow: "黄色", orange: "橙色", white: "白色", blue: "蓝色",
-  tracerred: "红色", tracergreen: "绿色", traceryellow: "黄色",
+  red: "红色",
+  green: "绿色",
+  yellow: "黄色",
+  orange: "橙色",
+  white: "白色",
+  blue: "蓝色",
+  tracerred: "红色",
+  tracergreen: "绿色",
+  traceryellow: "黄色",
 };
 
 let seq = 0;
@@ -100,7 +118,10 @@ let picked = new Set<string>();
 let pickedReady = false;
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function num(value: unknown) {
@@ -109,7 +130,11 @@ function num(value: unknown) {
 }
 
 function caliberKey(value: string) {
-  return value.trim().toLowerCase().replace(/\s+/g, "").replace(/^caliber/, "");
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/^caliber/, "");
 }
 
 function caliberLabel(value: string) {
@@ -127,7 +152,7 @@ function armorBlock(pen: number, armorClass: number, durability = 100) {
 }
 
 function armorHit(pen: number, armorClass: number, armorDamage: number) {
-  return Math.max(1, armorDamage / 100 * pen * 0.45 * (0.7 + 0.05 * armorClass)) / 60 * 100;
+  return (Math.max(1, (armorDamage / 100) * pen * 0.45 * (0.7 + 0.05 * armorClass)) / 60) * 100;
 }
 
 function effectOf(pen: number, armorClass: number, armorDamage: number) {
@@ -154,7 +179,10 @@ function effectOf(pen: number, armorClass: number, armorDamage: number) {
 function thumbUrl(src: string) {
   const url = src.trim();
   if (!url) return "";
-  return url.replace(/-(?:icon|grid-image|base-image|512|8x|image)\.webp(\?.*)?$/i, "-base-image.webp$1");
+  return url.replace(
+    /-(?:icon|grid-image|base-image|512|8x|image)\.webp(\?.*)?$/i,
+    "-base-image.webp$1",
+  );
 }
 
 function readAmmo(value: unknown): Ammo | null {
@@ -172,9 +200,15 @@ function readAmmo(value: unknown): Ammo | null {
     short: String(row.short_name || "").trim(),
     caliber: String(row.caliber || "").trim(),
     type: String(row.ammo_type || "").trim(),
-    tracer: tracerRaw === true || tracerRaw === 1 || Boolean(String(tracerRaw || "").trim()) || Boolean(tracerColor),
+    tracer:
+      tracerRaw === true ||
+      tracerRaw === 1 ||
+      Boolean(String(tracerRaw || "").trim()) ||
+      Boolean(tracerColor),
     tracerColor,
-    icon: thumbUrl(icon) || (/^[a-f0-9]{24}$/i.test(id) ? `https://assets.tarkov.dev/${id}-base-image.webp` : ""),
+    icon:
+      thumbUrl(icon) ||
+      (/^[a-f0-9]{24}$/i.test(id) ? `https://assets.tarkov.dev/${id}-base-image.webp` : ""),
     pack: thumbUrl(String(row.pack_icon_link || row.packIconLink || "").trim()),
     damage: num(row.damage),
     penetration: num(row.penetration),
@@ -187,12 +221,6 @@ function readAmmo(value: unknown): Ammo | null {
     heavyBleed: num(row.heavy_bleed_modifier),
     speed: num(row.initial_speed),
   };
-}
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
 }
 
 function groups() {
@@ -208,12 +236,16 @@ function groups() {
   return [...order.filter((item) => byType.has(item)), ...rest].map((type) => ({
     type,
     label: TYPE_LABEL[type] || type || "未标注",
-    calibers: [...(byType.get(type) || [])].sort((a, b) => caliberLabel(a).localeCompare(caliberLabel(b), "zh")),
+    calibers: [...(byType.get(type) || [])].sort((a, b) =>
+      caliberLabel(a).localeCompare(caliberLabel(b), "zh"),
+    ),
   }));
 }
 
 function allCalibers() {
-  return [...new Set(rows.map((row) => row.caliber).filter(Boolean))].sort((a, b) => caliberLabel(a).localeCompare(caliberLabel(b), "zh", { numeric: true }));
+  return [...new Set(rows.map((row) => row.caliber).filter(Boolean))].sort((a, b) =>
+    caliberLabel(a).localeCompare(caliberLabel(b), "zh", { numeric: true }),
+  );
 }
 
 function caliberColor(caliber: string) {
@@ -230,7 +262,11 @@ function loadPicked(available: string[]) {
     if (!raw) return available;
     const parsed = JSON.parse(raw) as { selectedCalibers?: unknown };
     if (!Array.isArray(parsed.selectedCalibers)) return available;
-    const saved = new Set(parsed.selectedCalibers.filter((item): item is string => typeof item === "string" && item.trim().length > 0));
+    const saved = new Set(
+      parsed.selectedCalibers.filter(
+        (item): item is string => typeof item === "string" && item.trim().length > 0,
+      ),
+    );
     return available.filter((item) => saved.has(item));
   } catch {
     return available;
@@ -254,7 +290,9 @@ function visible() {
   });
   const dir = sortAsc ? 1 : -1;
   list.sort((a, b) => {
-    const byCaliber = caliberLabel(a.caliber).localeCompare(caliberLabel(b.caliber), "zh", { numeric: true });
+    const byCaliber = caliberLabel(a.caliber).localeCompare(caliberLabel(b.caliber), "zh", {
+      numeric: true,
+    });
     if (byCaliber) return byCaliber;
     const delta = a[sortKey] - b[sortKey];
     if (delta) return delta * dir;
@@ -289,19 +327,24 @@ function signedCell(value: number, polarity: "accuracy" | "recoil") {
 
 function traitMarks(row: Ammo) {
   const marks: string[] = [];
-  if (row.speed > 0 && row.speed < 343) marks.push(`<sup class="ammo-mark" title="亚音速弹">S</sup>`);
+  if (row.speed > 0 && row.speed < 343)
+    marks.push(`<sup class="ammo-mark" title="亚音速弹">S</sup>`);
   if (row.tracer) {
     const color = TRACER_ZH[row.tracerColor.trim().toLowerCase()];
-    marks.push(`<sup class="ammo-mark" title="${esc(color ? `${color}曳光弹` : "曳光弹")}">T</sup>`);
+    marks.push(
+      `<sup class="ammo-mark" title="${esc(color ? `${color}曳光弹` : "曳光弹")}">T</sup>`,
+    );
   }
   return marks.length ? `<span class="ammo-marks">${marks.join("")}</span>` : "";
 }
 
 function armorCells(row: Ammo) {
-  return `<div class="ammo-armor">${[1, 2, 3, 4, 5, 6].map((klass) => {
-    const level = effectOf(row.penetration, klass, row.armorDamage);
-    return `<i style="background:${EFFECT_BG[level]}" title="${klass}级 ${EFFECT[level]}">${EFFECT[level]}</i>`;
-  }).join("")}</div>`;
+  return `<div class="ammo-armor">${[1, 2, 3, 4, 5, 6]
+    .map((klass) => {
+      const level = effectOf(row.penetration, klass, row.armorDamage);
+      return `<i style="background:${EFFECT_BG[level]}" title="${klass}级 ${EFFECT[level]}">${EFFECT[level]}</i>`;
+    })
+    .join("")}</div>`;
 }
 
 function sortButton(key: SortKey, label: string) {
@@ -322,15 +365,31 @@ function scatter(list: Ammo[]) {
   const plotH = height - pad.top - pad.bottom;
   const xOf = (value: number) => pad.left + (value / maxX) * plotW;
   const yOf = (value: number) => pad.top + plotH - (value / maxY) * plotH;
-  const grid = [0.25, 0.5, 0.75, 1].map((step) => {
-    const x = pad.left + plotW * step;
-    const y = pad.top + plotH * (1 - step);
-    return `<line class="ammo-grid" x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + plotH}" /><line class="ammo-grid" x1="${pad.left}" y1="${y}" x2="${pad.left + plotW}" y2="${y}" />`;
-  }).join("");
+  const grid = [0.25, 0.5, 0.75, 1]
+    .map((step) => {
+      const x = pad.left + plotW * step;
+      const y = pad.top + plotH * (1 - step);
+      return `<line class="ammo-grid" x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + plotH}" /><line class="ammo-grid" x1="${pad.left}" y1="${y}" x2="${pad.left + plotW}" y2="${y}" />`;
+    })
+    .join("");
   const ticks = (max: number) => [0, max / 2, max];
-  const xTicks = ticks(maxX).map((value) => `<text x="${xOf(value)}" y="${height - 12}" text-anchor="middle">${value}</text>`).join("");
-  const yTicks = ticks(maxY).map((value) => `<text x="${pad.left - 8}" y="${yOf(value) + 4}" text-anchor="end">${value}</text>`).join("");
-  const dots = plotted.map((row) => `<circle cx="${xOf(row.penetration).toFixed(1)}" cy="${yOf(row.damage).toFixed(1)}" r="5" fill="${caliberColor(row.caliber)}" data-wiki="item" data-wiki-id="${esc(row.id)}" data-ammo-tip="${esc(row.id)}"></circle>`).join("");
+  const xTicks = ticks(maxX)
+    .map(
+      (value) => `<text x="${xOf(value)}" y="${height - 12}" text-anchor="middle">${value}</text>`,
+    )
+    .join("");
+  const yTicks = ticks(maxY)
+    .map(
+      (value) =>
+        `<text x="${pad.left - 8}" y="${yOf(value) + 4}" text-anchor="end">${value}</text>`,
+    )
+    .join("");
+  const dots = plotted
+    .map(
+      (row) =>
+        `<circle cx="${xOf(row.penetration).toFixed(1)}" cy="${yOf(row.damage).toFixed(1)}" r="5" fill="${caliberColor(row.caliber)}" data-wiki="item" data-wiki-id="${esc(row.id)}" data-ammo-tip="${esc(row.id)}"></circle>`,
+    )
+    .join("");
   return `<div class="ammo-scatter"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="弹药穿透与伤害散点图">
     ${grid}
     <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" />
@@ -363,23 +422,32 @@ function render() {
   const spans = rowSpans(slice);
   const checkIcon = `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M2 2h12v12H2V2zm1.6 1.6v8.8h8.8V3.6H3.6zm1 4.3 1.5 1.5 3.5-3.7.9.9-4.4 4.6-2.4-2.4.9-.9z"/></svg>`;
   const clearIcon = `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M3.2 3.2 12.8 12.8M12.8 3.2 3.2 12.8"/></svg>`;
-  const filter = groups().map((group) => {
-    const on = group.calibers.filter((item) => picked.has(item)).length;
-    const chips = group.calibers.map((item) => {
-      const checked = picked.has(item);
-      const label = caliberLabel(item);
-      return `<button type="button" class="ammo-chip${checked ? " on" : ""}" data-ammo-caliber="${esc(item)}" title="${esc(label)}"><i class="ammo-dot" style="background:${caliberColor(item)};opacity:${checked ? 1 : 0.35}"></i><span>${esc(label)}</span></button>`;
-    }).join("");
-    return `<div class="ammo-row"><div class="ammo-label">${esc(group.label)}</div><div class="ammo-chips">${chips}</div><div class="ammo-row-acts"><button type="button" class="ammo-icon-btn" data-ammo-type="${esc(group.type)}" title="全选本行" aria-label="全选本行" ${on === group.calibers.length ? "disabled" : ""}>${checkIcon}</button><button type="button" class="ammo-icon-btn" data-ammo-type-clear="${esc(group.type)}" title="清空本行" aria-label="清空本行" ${on === 0 ? "disabled" : ""}>${clearIcon}</button></div></div>`;
-  }).join("");
-  const body = slice.map((row) => {
-    const span = spans.get(row.id) ?? 1;
-    const caliber = span
-      ? `<td class="ammo-caliber" rowspan="${span}"><button type="button" data-ammo-only="${esc(row.caliber)}" title="只看${esc(caliberLabel(row.caliber))}">${esc(caliberLabel(row.caliber))}</button></td>`
-      : "";
-    const thumb = row.icon ? `<img class="ammo-thumb" src="${esc(row.icon)}" alt="" />` : `<i class="ammo-thumb"></i>`;
-    const pack = row.pack ? `<img class="ammo-thumb" src="${esc(row.pack)}" alt="" title="弹药包形态" />` : `<span class="ammo-zero" title="没有对应的弹药包">—</span>`;
-    return `<tr>
+  const filter = groups()
+    .map((group) => {
+      const on = group.calibers.filter((item) => picked.has(item)).length;
+      const chips = group.calibers
+        .map((item) => {
+          const checked = picked.has(item);
+          const label = caliberLabel(item);
+          return `<button type="button" class="ammo-chip${checked ? " on" : ""}" data-ammo-caliber="${esc(item)}" title="${esc(label)}"><i class="ammo-dot" style="background:${caliberColor(item)};opacity:${checked ? 1 : 0.35}"></i><span>${esc(label)}</span></button>`;
+        })
+        .join("");
+      return `<div class="ammo-row"><div class="ammo-label">${esc(group.label)}</div><div class="ammo-chips">${chips}</div><div class="ammo-row-acts"><button type="button" class="ammo-icon-btn" data-ammo-type="${esc(group.type)}" title="全选本行" aria-label="全选本行" ${on === group.calibers.length ? "disabled" : ""}>${checkIcon}</button><button type="button" class="ammo-icon-btn" data-ammo-type-clear="${esc(group.type)}" title="清空本行" aria-label="清空本行" ${on === 0 ? "disabled" : ""}>${clearIcon}</button></div></div>`;
+    })
+    .join("");
+  const body = slice
+    .map((row) => {
+      const span = spans.get(row.id) ?? 1;
+      const caliber = span
+        ? `<td class="ammo-caliber" rowspan="${span}"><button type="button" data-ammo-only="${esc(row.caliber)}" title="只看${esc(caliberLabel(row.caliber))}">${esc(caliberLabel(row.caliber))}</button></td>`
+        : "";
+      const thumb = row.icon
+        ? `<img class="ammo-thumb" src="${esc(row.icon)}" alt="" />`
+        : `<i class="ammo-thumb"></i>`;
+      const pack = row.pack
+        ? `<img class="ammo-thumb" src="${esc(row.pack)}" alt="" title="弹药包形态" />`
+        : `<span class="ammo-zero" title="没有对应的弹药包">—</span>`;
+      return `<tr>
       ${caliber}
       <td><span class="ammo-name">${thumb}<button type="button" class="ammo-link" data-wiki="item" data-wiki-id="${esc(row.id)}" title="查看弹药详情">${esc(row.name)}</button>${traitMarks(row)}</span></td>
       <td class="ammo-pack">${pack}</td>
@@ -395,8 +463,11 @@ function render() {
       <td class="num">${row.speed > 0 ? Math.round(row.speed) : "—"}</td>
       <td class="ammo-armor-cell">${armorCells(row)}</td>
     </tr>`;
-  }).join("");
-  const armorHead = [1, 2, 3, 4, 5, 6].map((klass) => `<b title="${klass} 级护甲。色块表示该弹对该级护甲的估算效果。">${klass}</b>`).join("");
+    })
+    .join("");
+  const armorHead = [1, 2, 3, 4, 5, 6]
+    .map((klass) => `<b title="${klass} 级护甲。色块表示该弹对该级护甲的估算效果。">${klass}</b>`)
+    .join("");
   return `
     <div class="ammo-stack">
       <div class="ammo-filters">${filter || `<p class="ammo-empty">暂无口径数据</p>`}</div>
@@ -441,10 +512,12 @@ function render() {
 }
 
 function tipHtml(row: Ammo) {
-  const cells = [1, 2, 3, 4, 5, 6].map((klass) => {
-    const level = effectOf(row.penetration, klass, row.armorDamage);
-    return `<i style="background:${EFFECT_BG[level]}"><b>${klass}级</b>${EFFECT[level]}</i>`;
-  }).join("");
+  const cells = [1, 2, 3, 4, 5, 6]
+    .map((klass) => {
+      const level = effectOf(row.penetration, klass, row.armorDamage);
+      return `<i style="background:${EFFECT_BG[level]}"><b>${klass}级</b>${EFFECT[level]}</i>`;
+    })
+    .join("");
   return `<strong>${esc(row.name)}</strong><div><span>穿透　${row.penetration}<br>伤害　${row.damage}<br>对甲　${row.armorDamage}</span><div><em>对护甲效果（估）</em><div class="ammo-tip-armor">${cells}</div></div></div>`;
 }
 
@@ -555,8 +628,13 @@ function bind(host: HTMLElement, caret: number | null) {
 function paint() {
   const host = document.querySelector<HTMLElement>("#ammo-chart");
   if (!host) return;
-  const typing = document.activeElement instanceof HTMLInputElement && Boolean(document.activeElement.closest("#ammo-find"));
-  const caret = typing && document.activeElement instanceof HTMLInputElement ? document.activeElement.selectionStart : null;
+  const typing =
+    document.activeElement instanceof HTMLInputElement &&
+    Boolean(document.activeElement.closest("#ammo-find"));
+  const caret =
+    typing && document.activeElement instanceof HTMLInputElement
+      ? document.activeElement.selectionStart
+      : null;
   host.innerHTML = render();
   bind(host, caret);
 }

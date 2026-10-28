@@ -2,6 +2,7 @@ pub(crate) mod local;
 mod logwatch;
 mod miaomiao;
 mod overlay;
+mod persist;
 mod room_ws;
 mod shotwatch;
 mod site;
@@ -16,18 +17,17 @@ async fn site_login(username: String, password: String) -> Result<site::SiteUser
 
 #[tauri::command]
 async fn site_logout() -> Result<(), String> {
-    room_ws::unwatch();
     site::logout().await
 }
 
 #[tauri::command]
-fn room_watch(app: tauri::AppHandle, public_id: String) {
-    room_ws::watch(app, public_id);
+fn room_watch(app: tauri::AppHandle, public_id: String) -> Result<u64, String> {
+    room_ws::watch(app, public_id)
 }
 
 #[tauri::command]
-fn room_unwatch() {
-    room_ws::unwatch();
+fn room_unwatch(generation: Option<u64>) {
+    room_ws::unwatch_generation(generation);
 }
 
 #[tauri::command]
@@ -47,7 +47,10 @@ fn shot_settings_get(app: tauri::AppHandle) -> shotwatch::ShotSettings {
 }
 
 #[tauri::command]
-fn shot_settings_set(app: tauri::AppHandle, settings: shotwatch::ShotSettings) -> Result<shotwatch::ShotSettings, String> {
+fn shot_settings_set(
+    app: tauri::AppHandle,
+    settings: shotwatch::ShotSettings,
+) -> Result<shotwatch::ShotSettings, String> {
     shotwatch::save_settings(&app, settings)
 }
 
@@ -102,7 +105,11 @@ fn paths_get(app: tauri::AppHandle) -> local::BoundPaths {
 }
 
 #[tauri::command]
-fn paths_set(app: tauri::AppHandle, screenshot_dir: String, log_dir: String) -> Result<local::BoundPaths, String> {
+fn paths_set(
+    app: tauri::AppHandle,
+    screenshot_dir: String,
+    log_dir: String,
+) -> Result<local::BoundPaths, String> {
     local::set_paths(&app, screenshot_dir, log_dir)
 }
 
@@ -137,12 +144,15 @@ fn miaomiao_get() -> miaomiao::MiaomiaoState {
 }
 
 #[tauri::command]
-fn miaomiao_save(state: miaomiao::MiaomiaoState, apply: bool) -> Result<miaomiao::MiaomiaoState, String> {
+fn miaomiao_save(
+    state: miaomiao::MiaomiaoState,
+    apply: bool,
+) -> Result<miaomiao::MiaomiaoState, String> {
     miaomiao::save(state, apply)
 }
 
 #[tauri::command]
-fn miaomiao_restore_delays() -> miaomiao::MiaomiaoState {
+fn miaomiao_restore_delays() -> Result<miaomiao::MiaomiaoState, String> {
     miaomiao::restore_delays()
 }
 
@@ -152,23 +162,23 @@ fn overlay_get() -> overlay::OverlayState {
 }
 
 #[tauri::command]
-fn overlay_save(state: overlay::OverlayState) -> overlay::OverlayState {
-    overlay::save(state)
+fn overlay_save(state: overlay::OverlayState) -> Result<overlay::OverlayState, String> {
+    overlay::save_preferences(state)
 }
 
 #[tauri::command]
-fn overlay_toggle() -> overlay::OverlayState {
+fn overlay_toggle() -> Result<overlay::OverlayState, String> {
     overlay::toggle()
 }
 
 #[tauri::command]
-fn overlay_reset() -> overlay::OverlayState {
+fn overlay_reset() -> Result<overlay::OverlayState, String> {
     overlay::reset()
 }
 
 #[tauri::command]
-fn overlay_note_map(slug: String) {
-    overlay::note_map(slug);
+fn overlay_note_map(slug: String) -> Result<(), String> {
+    overlay::note_map(slug)
 }
 
 #[tauri::command]
@@ -188,12 +198,16 @@ fn overlay_return_focus() {
 
 #[tauri::command]
 async fn log_state() -> logwatch::WatchState {
-    tokio::task::spawn_blocking(logwatch::state).await.expect("log-state")
+    tokio::task::spawn_blocking(logwatch::state)
+        .await
+        .expect("log-state")
 }
 
 #[tauri::command]
 async fn log_tails() -> logwatch::LogTails {
-    tokio::task::spawn_blocking(logwatch::tails).await.expect("log-tails")
+    tokio::task::spawn_blocking(logwatch::tails)
+        .await
+        .expect("log-tails")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -245,15 +259,17 @@ pub fn run() {
             logwatch::spawn(app.handle().clone());
             shotwatch::spawn(app.handle().clone());
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
-            let window = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("战鸽助手")
-                .inner_size(1280.0, 800.0)
-                .min_inner_size(960.0, 640.0)
-                .icon(icon)?
-                .build()?;
+            let window =
+                tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("战鸽助手")
+                    .inner_size(1280.0, 800.0)
+                    .min_inner_size(960.0, 640.0)
+                    .icon(icon)?
+                    .build()?;
             let handle = app.handle().clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    miaomiao::shutdown();
                     overlay::close_with_app(&handle);
                 }
             });

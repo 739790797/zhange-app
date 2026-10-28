@@ -1,4 +1,14 @@
-import { bindListSearch, listBusy, listFail, listFrame, listIcon, listItem, listShell, repaintList } from "./listFrame";
+import { invoke } from "./tauriBridge";
+import {
+  bindListSearch,
+  listBusy,
+  listFail,
+  listFrame,
+  listIcon,
+  listItem,
+  listShell,
+  repaintList,
+} from "./listFrame";
 import { spin } from "./spinner";
 import { mapPhrase, mapTitle } from "./mapNames";
 
@@ -57,9 +67,17 @@ type Detail = {
 };
 
 const GEAR_GROUPS = [
-  { id: "wear", label: "穿着", keys: ["headwear", "face", "eyewear", "earpiece", "armor", "rig", "backpack"] },
+  {
+    id: "wear",
+    label: "穿着",
+    keys: ["headwear", "face", "eyewear", "earpiece", "armor", "rig", "backpack"],
+  },
   { id: "arms", label: "武装", keys: ["gun", "pistol", "melee", "grenade"] },
-  { id: "carry", label: "携带", keys: ["ammo", "meds", "provisions", "keys", "special", "container", "other"] },
+  {
+    id: "carry",
+    label: "携带",
+    keys: ["ammo", "meds", "provisions", "keys", "special", "container", "other"],
+  },
 ];
 const EFFECT = ["无效", "勉强", "扫射", "略好", "有效", "很好", "无视"];
 const EFFECT_BG = ["#6d1010", "#8f2a14", "#a34818", "#a35f16", "#6b7024", "#3d7a2a", "#2f9b32"];
@@ -74,7 +92,10 @@ let detailLoading = false;
 let detailError = "";
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function rec(value: unknown): Record<string, unknown> | null {
@@ -119,12 +140,6 @@ function isTopBoss(boss: Boss) {
   return isBossId(boss.id) || boss.kind === "boss";
 }
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
-
 function readBoss(row: Record<string, unknown>): Boss | null {
   const id = str(row.id) || str(row.slug);
   const slug = str(row.slug) || id;
@@ -165,8 +180,13 @@ function bodyName(value: string) {
   if (!text || /[\u4e00-\u9fff]/.test(text)) return text;
   const key = text.toLowerCase().replace(/[\s_-]+/g, "");
   const label: Record<string, string> = {
-    head: "头部", thorax: "胸部", stomach: "腹部",
-    leftarm: "左臂", rightarm: "右臂", leftleg: "左腿", rightleg: "右腿",
+    head: "头部",
+    thorax: "胸部",
+    stomach: "腹部",
+    leftarm: "左臂",
+    rightarm: "右臂",
+    leftleg: "左腿",
+    rightleg: "右腿",
   };
   return label[key] || text;
 }
@@ -196,14 +216,16 @@ function readDetail(row: Record<string, unknown>): Detail {
       if (!name) return [];
       return [{ slug: str(cell.slug), name, count: num(cell.count), chance: num(cell.chance) }];
     });
-    return [{
-      maps,
-      shared: str(group.shared_spawn_chance || group.sharedSpawnChance),
-      land: str(group.land_label || group.landLabel),
-      locations,
-      escorts,
-      showChance: group.show_location_chance === true || group.showLocationChance === true,
-    }];
+    return [
+      {
+        maps,
+        shared: str(group.shared_spawn_chance || group.sharedSpawnChance),
+        land: str(group.land_label || group.landLabel),
+        locations,
+        escorts,
+        showChance: group.show_location_chance === true || group.showLocationChance === true,
+      },
+    ];
   });
   const slots = (Array.isArray(row.equipment_slots) ? row.equipment_slots : []).flatMap((item) => {
     const slot = rec(item);
@@ -274,16 +296,28 @@ function listed() {
   const { trees, others } = catalog();
   const shownTrees = trees.flatMap((tree) => {
     const parentHit = matches(tree.boss, needle);
-    const children = tree.children.filter((child) => parentHit || matches(child, needle) || child.slug === pickedBoss);
+    const children = tree.children.filter(
+      (child) => parentHit || matches(child, needle) || child.slug === pickedBoss,
+    );
     if (!parentHit && !children.length && tree.boss.slug !== pickedBoss) return [];
-    return [{ boss: tree.boss, children: parentHit || tree.boss.slug === pickedBoss ? tree.children : children }];
+    return [
+      {
+        boss: tree.boss,
+        children: parentHit || tree.boss.slug === pickedBoss ? tree.children : children,
+      },
+    ];
   });
   const shownOthers = others.filter((boss) => matches(boss, needle) || boss.slug === pickedBoss);
   return { trees: shownTrees, others: shownOthers };
 }
 
 function sideItem(boss: Boss, nested = false) {
-  const row = listItem(esc(boss.name), boss.slug === pickedBoss, `data-boss-pick="${esc(boss.slug)}"`, listIcon(boss.image));
+  const row = listItem(
+    esc(boss.name),
+    boss.slug === pickedBoss,
+    `data-boss-pick="${esc(boss.slug)}"`,
+    listIcon(boss.image),
+  );
   return nested ? `<div class="boss-nest">${row}</div>` : row;
 }
 
@@ -299,13 +333,21 @@ function escortLabel(row: SpawnEscort) {
 
 function portraitOf(slug: string) {
   const key = slug.trim().toLowerCase();
-  return bosses.find((boss) => boss.slug.toLowerCase() === key || boss.id.toLowerCase() === key)?.image || "";
+  return (
+    bosses.find((boss) => boss.slug.toLowerCase() === key || boss.id.toLowerCase() === key)
+      ?.image || ""
+  );
 }
 
 function armorLevel(pen: number, armorClass: number, armorDamage: number) {
   const resist = (121 - 5000 / (45 + 200)) * armorClass * 0.1;
   const gap = pen - resist;
-  const first = gap >= 0 ? Math.min(0.99, 0.9 + Math.min(0.09, gap * 0.01)) : gap <= -15 ? 0 : Math.min(1, Math.max(0, 0.004 * (15 + gap) ** 2));
+  const first =
+    gap >= 0
+      ? Math.min(0.99, 0.9 + Math.min(0.09, gap * 0.01))
+      : gap <= -15
+        ? 0
+        : Math.min(1, Math.max(0, 0.004 * (15 + gap) ** 2));
   if (first >= 0.8) return 6;
   const loss = Math.max(1, pen * (armorDamage / 100) * 0.45 * (0.7 + 0.05 * armorClass));
   const shots = Math.min(30, (60 / loss) * (1 - first));
@@ -330,18 +372,26 @@ function gearCard(item: GearItem) {
   const magazines = item.contains.filter((child) => child.kind === "magazine");
   const ammo = item.contains.filter((child) => child.kind === "ammo");
   const plates = item.contains.filter((child) => child.kind === "plate");
-  const other = item.contains.filter((child) => !["magazine", "ammo", "plate"].includes(child.kind));
+  const other = item.contains.filter(
+    (child) => !["magazine", "ammo", "plate"].includes(child.kind),
+  );
   const klass = item.armorClass ? `<em>${item.armorClass} 级</em>` : "";
-  const block = (label: string, body: string) => body ? `<div class="boss-stow"><b>${label}</b><div>${body}</div></div>` : "";
-  const ammoRows = ammo.map((child) => {
-    const effects = child.pen != null && child.armorDmg != null
-      ? `<span class="boss-ammo-armor">${[1, 2, 3, 4, 5, 6].map((level) => {
-        const rank = armorLevel(child.pen || 0, level, child.armorDmg || 0);
-        return `<i style="background:${EFFECT_BG[rank]}" title="${level}级 ${EFFECT[rank]}">${level}</i>`;
-      }).join("")}</span>`
-      : "";
-    return `<div class="boss-ammo">${gearButton(child, "boss-gear-mini")}<span>${child.damage ?? "—"} / ${child.pen ?? "—"}</span>${effects}</div>`;
-  }).join("");
+  const block = (label: string, body: string) =>
+    body ? `<div class="boss-stow"><b>${label}</b><div>${body}</div></div>` : "";
+  const ammoRows = ammo
+    .map((child) => {
+      const effects =
+        child.pen != null && child.armorDmg != null
+          ? `<span class="boss-ammo-armor">${[1, 2, 3, 4, 5, 6]
+              .map((level) => {
+                const rank = armorLevel(child.pen || 0, level, child.armorDmg || 0);
+                return `<i style="background:${EFFECT_BG[rank]}" title="${level}级 ${EFFECT[rank]}">${level}</i>`;
+              })
+              .join("")}</span>`
+          : "";
+      return `<div class="boss-ammo">${gearButton(child, "boss-gear-mini")}<span>${child.damage ?? "—"} / ${child.pen ?? "—"}</span>${effects}</div>`;
+    })
+    .join("");
   return `<article class="boss-gear">
     <div class="boss-gear-line">${gearButton(item, "boss-gear-main")}${klass}</div>
     ${block("弹匣", magazines.map((child) => gearButton(child, "boss-gear-mini")).join(""))}
@@ -355,10 +405,12 @@ function gearHtml(slots: GearSlot[]) {
   const plates = slots.filter((slot) => slot.key === "armorPlate").flatMap((slot) => slot.items);
   const merged = slots.flatMap((slot) => {
     if (slot.key === "armorPlate") return [];
-    if (slot.key === "armor" && plates.length) return [{ ...slot, label: slot.label || "身体护甲", items: [...slot.items, ...plates] }];
+    if (slot.key === "armor" && plates.length)
+      return [{ ...slot, label: slot.label || "身体护甲", items: [...slot.items, ...plates] }];
     return [slot];
   });
-  if (plates.length && !merged.some((slot) => slot.key === "armor")) merged.unshift({ key: "armor", label: "身体护甲", items: plates });
+  if (plates.length && !merged.some((slot) => slot.key === "armor"))
+    merged.unshift({ key: "armor", label: "身体护甲", items: plates });
   const used = new Set<string>();
   const groups = GEAR_GROUPS.map((group) => {
     const rows = merged.filter((slot) => group.keys.includes(slot.key));
@@ -373,34 +425,50 @@ function gearHtml(slots: GearSlot[]) {
 
 function spawnHtml(detailRow: Detail) {
   if (!detailRow.groups.length) return "";
-  const body = detailRow.groups.map((group) => {
-    const maps = group.maps.map((map) => {
-      const chance = map.chance || group.shared;
-      const label = `${esc(map.name)}${chance ? `（${esc(chance)}）` : ""}`;
-      return map.slug
-        ? `<button type="button" data-map="${esc(map.slug)}">${label}</button>`
-        : `<span>${label}</span>`;
-    }).join("") || "—";
-    const locations = group.locations.map((loc) => {
-      const chance = group.showChance && loc.chance > 0 ? ` ${Math.round(loc.chance * 100)}%` : "";
-      return `<span>${esc(loc.name)}${chance}</span>`;
-    }).join("") || "—";
-    const escorts = group.escorts.map((escort) => {
-      const image = portraitOf(escort.slug);
-      const face = image ? `<img src="${esc(image)}" alt="" />` : "";
-      const attrs = escort.slug ? ` data-boss-pick="${esc(escort.slug)}"` : "";
-      return `<button type="button" class="boss-escort"${attrs}>${face}<span>${esc(escortLabel(escort))}</span></button>`;
-    }).join("") || "—";
-    return `<tr><td>${maps}</td><td>${esc(group.land || "—")}</td><td class="boss-locs">${locations}</td><td class="boss-escorts">${escorts}</td></tr>`;
-  }).join("");
+  const body = detailRow.groups
+    .map((group) => {
+      const maps =
+        group.maps
+          .map((map) => {
+            const chance = map.chance || group.shared;
+            const label = `${esc(map.name)}${chance ? `（${esc(chance)}）` : ""}`;
+            return map.slug
+              ? `<button type="button" data-map="${esc(map.slug)}">${label}</button>`
+              : `<span>${label}</span>`;
+          })
+          .join("") || "—";
+      const locations =
+        group.locations
+          .map((loc) => {
+            const chance =
+              group.showChance && loc.chance > 0 ? ` ${Math.round(loc.chance * 100)}%` : "";
+            return `<span>${esc(loc.name)}${chance}</span>`;
+          })
+          .join("") || "—";
+      const escorts =
+        group.escorts
+          .map((escort) => {
+            const image = portraitOf(escort.slug);
+            const face = image ? `<img src="${esc(image)}" alt="" />` : "";
+            const attrs = escort.slug ? ` data-boss-pick="${esc(escort.slug)}"` : "";
+            return `<button type="button" class="boss-escort"${attrs}>${face}<span>${esc(escortLabel(escort))}</span></button>`;
+          })
+          .join("") || "—";
+      return `<tr><td>${maps}</td><td>${esc(group.land || "—")}</td><td class="boss-locs">${locations}</td><td class="boss-escorts">${escorts}</td></tr>`;
+    })
+    .join("");
   return `<section class="boss-section"><h3>刷新</h3><div class="boss-spawn-wrap"><table class="boss-spawn"><thead><tr><th>地图</th><th>落地</th><th>区域</th><th>随从</th></tr></thead><tbody>${body}</tbody></table></div></section>`;
 }
 
 function detailHtml(row: Detail) {
   const known = bosses.find((boss) => boss.slug === row.slug);
   const badge = known && isTopBoss(known) ? `<span class="boss-badge">Boss</span>` : "";
-  const wiki = row.wiki ? `<a class="boss-wiki" href="${esc(row.wiki)}" target="_blank" rel="noreferrer">Wiki</a>` : "";
-  const health = row.health.length ? `<div class="boss-health-parts">${row.health.map((part) => `${esc(part.name)} ${part.max}`).join(" · ")}</div>` : "";
+  const wiki = row.wiki
+    ? `<a class="boss-wiki" href="${esc(row.wiki)}" target="_blank" rel="noreferrer">Wiki</a>`
+    : "";
+  const health = row.health.length
+    ? `<div class="boss-health-parts">${row.health.map((part) => `${esc(part.name)} ${part.max}`).join(" · ")}</div>`
+    : "";
   const poster = row.poster || row.portrait;
   return `<div class="boss-detail">
     <section class="boss-hero">
@@ -425,7 +493,8 @@ function detailHtml(row: Detail) {
 function panelHtml() {
   if (!pickedBoss) return `<p class="tarkov-list-empty">从左侧选择一个角色。</p>`;
   if (detailLoading && detailSlug === pickedBoss && !detail) return spin("正在读取详情");
-  if (detailError && detailSlug === pickedBoss) return `<p class="tarkov-list-empty">${esc(detailError)}</p>`;
+  if (detailError && detailSlug === pickedBoss)
+    return `<p class="tarkov-list-empty">${esc(detailError)}</p>`;
   if (detail && detailSlug === pickedBoss) return detailHtml(detail);
   return spin("正在读取详情");
 }
@@ -434,8 +503,16 @@ function render() {
   const { trees, others } = listed();
   const current = bosses.find((boss) => boss.slug === pickedBoss);
   const side = [
-    trees.length ? sideHead("Boss", trees.reduce((count, tree) => count + 1 + tree.children.length, 0)) : "",
-    ...trees.flatMap((tree) => [sideItem(tree.boss), ...tree.children.map((child) => sideItem(child, true))]),
+    trees.length
+      ? sideHead(
+          "Boss",
+          trees.reduce((count, tree) => count + 1 + tree.children.length, 0),
+        )
+      : "",
+    ...trees.flatMap((tree) => [
+      sideItem(tree.boss),
+      ...tree.children.map((child) => sideItem(child, true)),
+    ]),
     others.length ? sideHead("非 Boss", others.length) : "",
     ...others.map((boss) => sideItem(boss)),
   ].join("");
@@ -455,9 +532,13 @@ async function ensureDetail(slug: string) {
   detailLoading = true;
   paint();
   try {
-    const data = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/bosses/${encodeURIComponent(slug)}` });
+    const data = await invoke<Record<string, unknown>>("site_get", {
+      path: `/guides/tarkov/bosses/${encodeURIComponent(slug)}`,
+    });
     if (detailSlug !== slug) return;
-    detail = readDetail(data.boss && typeof data.boss === "object" ? data.boss as Record<string, unknown> : data);
+    detail = readDetail(
+      data.boss && typeof data.boss === "object" ? (data.boss as Record<string, unknown>) : data,
+    );
   } catch (error) {
     if (detailSlug !== slug) return;
     detailError = error instanceof Error ? error.message : "Boss 详情读取失败";
@@ -500,7 +581,9 @@ export async function mountBosses() {
   if (!host) return;
   listBusy(host, "正在读取 Boss");
   try {
-    const data = await invoke<{ items?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/bosses" });
+    const data = await invoke<{ items?: Record<string, unknown>[] }>("site_get", {
+      path: "/guides/tarkov/bosses",
+    });
     if (token !== seq || !document.querySelector("#boss-list")) return;
     bosses = (data.items || []).flatMap((item) => {
       const row = rec(item);

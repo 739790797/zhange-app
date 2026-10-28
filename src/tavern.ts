@@ -1,8 +1,23 @@
+import { invoke } from "./tauriBridge";
 import { spin } from "./spinner";
+import { TAVERN_BASE as BASE, tavernMatch } from "./routePath";
+import {
+  boundTavernBody,
+  limitTavernText,
+  MAX_TAVERN_BODY_CHARS,
+  MAX_TAVERN_COMMENTS,
+  normalizeTavernComments,
+  orderTavernComments,
+  type TavernComment,
+} from "./tavernData";
 
-const BASE = "/主菜单/战鸽酒馆";
+export { tavernMatch } from "./routePath";
+
 const SITE = "https://zhange.space";
+const IMAGE_HOSTS = new Set(["zhange.space", "assets.tarkov.dev", "tarkov.dev"]);
 const PAGE_SIZE = 10;
+const MAX_TAVERN_CATEGORIES = 64;
+const MAX_ARTICLE_TAGS = 64;
 
 type Category = { slug: string; name: string; chip_color?: string };
 type Author = { display_name?: string; avatar_url?: string };
@@ -21,35 +36,81 @@ type ArticlePage = {
   page?: number;
   page_size?: number;
 };
-type ArticleDetail = ArticleCard & { body?: string; body_format?: string; tags?: { name: string }[] };
-type Comment = {
-  id: number;
-  body: string;
-  parent_id: number | null;
-  created_at?: string;
-  author?: Author;
+type ArticleDetail = ArticleCard & {
+  body?: string;
+  body_format?: string;
+  tags?: { name: string }[];
 };
-
 type ListQuery = { q: string; category: string; page: number };
 
 const ALLOWED = new Set([
-  "p", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "b", "i", "code", "pre",
-  "ul", "ol", "li", "a", "img", "figure", "figcaption", "hr", "br", "blockquote", "span",
+  "p",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "strong",
+  "em",
+  "b",
+  "i",
+  "code",
+  "pre",
+  "ul",
+  "ol",
+  "li",
+  "a",
+  "img",
+  "figure",
+  "figcaption",
+  "hr",
+  "br",
+  "blockquote",
+  "span",
 ]);
 
 let replyTo = 0;
+let listRequestGeneration = 0;
+let articleRequestGeneration = 0;
 
-export function tavernMatch(pathname: string): { kind: "list" } | { kind: "article"; slug: string } | null {
-  if (pathname === BASE) return { kind: "list" };
-  if (!pathname.startsWith(`${BASE}/`)) return null;
-  const slug = pathname.slice(BASE.length + 1).split("/")[0];
-  return slug ? { kind: "article", slug } : { kind: "list" };
+function routeKey() {
+  return `${location.pathname}${location.search}`;
+}
+
+function currentListRequest(generation: number, expectedRoute: string, feed: Element) {
+  return (
+    generation === listRequestGeneration &&
+    expectedRoute === routeKey() &&
+    tavernMatch(location.pathname)?.kind === "list" &&
+    feed.isConnected &&
+    document.querySelector("#tavern-feed") === feed
+  );
+}
+
+function currentArticleRequest(
+  generation: number,
+  slug: string,
+  expectedRoute: string,
+  host: Element,
+) {
+  return (
+    generation === articleRequestGeneration &&
+    currentArticleRoute(slug, expectedRoute) &&
+    host.isConnected &&
+    document.querySelector("#tavern-page") === host
+  );
+}
+
+function currentArticleRoute(slug: string, expectedRoute: string) {
+  const route = tavernMatch(location.pathname);
+  return expectedRoute === routeKey() && route?.kind === "article" && route.slug === slug;
 }
 
 export function tavernListHref(query: Partial<ListQuery> = {}) {
   const params = new URLSearchParams();
-  if (query.q) params.set("q", query.q);
-  if (query.category) params.set("category", query.category);
+  if (query.q) params.set("q", limitTavernText(query.q, 200));
+  if (query.category) params.set("category", limitTavernText(query.category, 256));
   if (query.page && query.page > 1) params.set("page", String(query.page));
   const text = params.toString();
   return text ? `${BASE}?${text}` : BASE;
@@ -59,37 +120,76 @@ function listQuery(): ListQuery {
   const params = new URLSearchParams(location.search);
   const page = Number(params.get("page") || "1");
   return {
-    q: (params.get("q") || "").trim(),
-    category: params.get("category") || "",
-    page: Number.isFinite(page) && page > 0 ? page : 1,
+    q: limitTavernText(params.get("q") || "", 200).trim(),
+    category: limitTavernText(params.get("category") || "", 256),
+    page: Number.isSafeInteger(page) && page > 0 ? page : 1,
   };
 }
 
-function esc(value: string) {
-  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char);
+function esc(value: unknown) {
+  return String(value ?? "").replace(
+    /[&<>"']/g,
+    (char) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char,
+  );
 }
 
-function formatDate(value?: string) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
+function safePositiveInteger(value: unknown): number | null {
+  let parsed: number;
+  if (typeof value === "number") parsed = value;
+  else if (typeof value === "string" && /^\d{1,16}$/.test(value)) parsed = Number(value);
+  else return null;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function safeNonNegativeInteger(value: unknown): number | null {
+  let parsed: number;
+  if (typeof value === "number") parsed = value;
+  else if (typeof value === "string" && /^\d{1,16}$/.test(value)) parsed = Number(value);
+  else return null;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function safeChipColor(value: unknown) {
+  if (typeof value !== "string") return "#8a7344";
+  const color = value.trim();
+  if (
+    !color ||
+    color.length > 64 ||
+    /[;{}<>"'\\\u0000-\u001f]/.test(color) ||
+    !CSS.supports("color", color)
+  ) {
+    return "#8a7344";
+  }
+  return color;
+}
+
+function formatDate(value?: unknown) {
+  if (typeof value !== "string" || !value) return "";
+  const bounded = value.slice(0, 128);
+  const date = new Date(bounded);
+  if (Number.isNaN(date.getTime())) return bounded.slice(0, 10);
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-}
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
 }
 
 function safeUrl(value: string, image: boolean) {
   const raw = value.trim();
-  if (!raw || raw.startsWith("//") || /^javascript:/i.test(raw) || /^data:/i.test(raw)) return "";
+  if (
+    !raw ||
+    raw.length > 2048 ||
+    /[\u0000-\u001f\u007f\\]/.test(raw) ||
+    raw.startsWith("//") ||
+    /^javascript:/i.test(raw) ||
+    /^data:/i.test(raw)
+  )
+    return "";
   if (raw.startsWith("/")) return `${SITE}${raw}`;
   try {
     const url = new URL(raw);
     if (url.protocol !== "https:" && url.protocol !== "http:") return "";
     if (image && url.protocol !== "https:") return "";
+    if (url.username || url.password || (image && !IMAGE_HOSTS.has(url.hostname.toLowerCase())))
+      return "";
     return url.href;
   } catch {
     return "";
@@ -152,7 +252,7 @@ export function tavernListHtml() {
         <h1>战鸽酒馆</h1>
         <p>圈子里的文章与随笔</p>
         <form class="tavern-search" id="tavern-search">
-          <input name="q" value="${esc(query.q)}" placeholder="输入文章标题" aria-label="搜索文章" />
+          <input name="q" maxlength="200" value="${esc(query.q)}" placeholder="输入文章标题" aria-label="搜索文章" />
           <button type="submit">搜索</button>
         </form>
       </header>
@@ -168,37 +268,76 @@ export function tavernArticleHtml() {
 }
 
 function cardHtml(item: ArticleCard) {
-  const category = item.categories?.[0];
+  const rawCategory = item.categories?.[0];
+  const category = rawCategory
+    ? {
+        slug: limitTavernText(rawCategory.slug, 256),
+        name: limitTavernText(rawCategory.name, 128),
+        chip_color: rawCategory.chip_color,
+      }
+    : undefined;
+  const slug = limitTavernText(item.slug, 256).trim();
+  const title = limitTavernText(item.title, 512);
   const chip = category
-    ? `<button type="button" class="tavern-chip" data-tavern-cat="${esc(category.slug)}" style="--chip:${esc(category.chip_color || "#8a7344")}">${esc(category.name)}</button>`
+    ? `<button type="button" class="tavern-chip" data-tavern-cat="${esc(category.slug)}" style="--chip:${safeChipColor(category.chip_color)}">${esc(category.name)}</button>`
     : "";
-  const summary = item.summary?.trim() ? `<p>${esc(item.summary)}</p>` : "";
-  const meta = [item.author?.display_name, formatDate(item.published_at), `${item.comment_count ?? 0} 条评论`].filter(Boolean).join(" · ");
+  const summaryText = limitTavernText(item.summary, 3_000).trim();
+  const summary = summaryText ? `<p>${esc(summaryText)}</p>` : "";
+  const author = limitTavernText(item.author?.display_name, 128);
+  const commentCount = safeNonNegativeInteger(item.comment_count) ?? 0;
+  const meta = [author, formatDate(item.published_at), `${commentCount} 条评论`]
+    .filter(Boolean)
+    .join(" · ");
   return `
     <article class="tavern-card">
-      <div class="tavern-card-title">${chip}<a href="${BASE}/${esc(item.slug)}" data-link>${esc(item.title)}</a></div>
+      <div class="tavern-card-title">${chip}<a href="${BASE}/${encodeURIComponent(slug)}" data-link>${esc(title)}</a></div>
       ${summary}
       <span>${esc(meta)}</span>
     </article>`;
 }
 
-function pagerHtml(page: number, total: number) {
+function pagerHtml(pageValue: unknown, totalValue: unknown, fallbackPage: number) {
+  const total = safeNonNegativeInteger(totalValue) ?? 0;
   const pages = Math.ceil(total / PAGE_SIZE);
   if (pages <= 1) return "";
-  const prev = page > 1 ? `<button type="button" data-tavern-page="${page - 1}">上一页</button>` : "";
-  const next = page < pages ? `<button type="button" data-tavern-page="${page + 1}">下一页</button>` : "";
+  const requestedPage = safePositiveInteger(pageValue) ?? safePositiveInteger(fallbackPage) ?? 1;
+  const page = Math.min(requestedPage, pages);
+  const prev =
+    page > 1 ? `<button type="button" data-tavern-page="${page - 1}">上一页</button>` : "";
+  const next =
+    page < pages ? `<button type="button" data-tavern-page="${page + 1}">下一页</button>` : "";
   return `<div class="tavern-pager">${prev}<span>${page} / ${pages}</span>${next}</div>`;
 }
 
-function catsHtml(items: Category[], active: string) {
+function catsHtml(rawItems: unknown, active: string) {
   const all = `<button type="button" data-tavern-cat="" class="${active ? "" : "on"}">全部</button>`;
-  const rest = items.map((item) =>
-    `<button type="button" data-tavern-cat="${esc(item.slug)}" class="${active === item.slug ? "on" : ""}"><i style="background:${esc(item.chip_color || "#8a7344")}"></i>${esc(item.name)}</button>`,
-  ).join("");
+  const items = Array.isArray(rawItems)
+    ? rawItems
+        .slice(0, MAX_TAVERN_CATEGORIES)
+        .filter((item): item is Category =>
+          Boolean(
+            item &&
+              typeof item === "object" &&
+              !Array.isArray(item) &&
+              typeof item.slug === "string" &&
+              item.slug.trim() &&
+              typeof item.name === "string",
+          ),
+        )
+    : [];
+  const rest = items
+    .map((item) => {
+      const slug = limitTavernText(item.slug, 256);
+      const name = limitTavernText(item.name, 128);
+      return `<button type="button" data-tavern-cat="${esc(slug)}" class="${active === slug ? "on" : ""}"><i style="background:${safeChipColor(item.chip_color)}"></i>${esc(name)}</button>`;
+    })
+    .join("");
   return `<h2>分类</h2><div class="tavern-cats">${all}${rest}</div>`;
 }
 
 export async function mountTavernList() {
+  const generation = ++listRequestGeneration;
+  const expectedRoute = routeKey();
   const query = listQuery();
   const feed = document.querySelector("#tavern-feed");
   const side = document.querySelector("#tavern-cats");
@@ -209,37 +348,53 @@ export async function mountTavernList() {
   try {
     const [data, categories] = await Promise.all([
       invoke<ArticlePage>("site_get", { path: `/articles?${params}` }),
-      invoke<Category[]>("site_get", { path: "/articles/categories" }).catch(() => []),
+      invoke<unknown>("site_get", { path: "/articles/categories" }).catch(() => []),
     ]);
-    if (!document.querySelector("#tavern-feed")) return;
-    const items = Array.isArray(data.items) ? data.items : [];
+    if (!currentListRequest(generation, expectedRoute, feed)) return;
+    const items = Array.isArray(data.items)
+      ? data.items
+          .slice(0, PAGE_SIZE)
+          .filter(
+            (item) => item && typeof item === "object" && limitTavernText(item.slug, 256).trim(),
+          )
+      : [];
     feed.innerHTML = items.length
-      ? `${items.map(cardHtml).join("")}${pagerHtml(data.page || query.page, data.total || 0)}`
+      ? `${items.map(cardHtml).join("")}${pagerHtml(data.page ?? query.page, data.total ?? 0, query.page)}`
       : `<p class="tavern-note">${query.q || query.category ? "没有符合筛选的文章。" : "大厅里暂时还没有已发布的文章。"}</p>`;
-    if (side) side.innerHTML = catsHtml(Array.isArray(categories) ? categories : [], query.category);
+    if (side?.isConnected && document.querySelector("#tavern-cats") === side) {
+      side.innerHTML = catsHtml(categories, query.category);
+    }
   } catch (error) {
+    if (!currentListRequest(generation, expectedRoute, feed)) return;
     feed.innerHTML = `<p class="tavern-note">${esc(error instanceof Error ? error.message : "无法加载文章")}</p>`;
   }
 }
 
-function commentHtml(item: Comment, nested: boolean) {
+function commentHtml(item: TavernComment, nested: boolean) {
   const name = item.author?.display_name || "读者";
+  const replyId = safePositiveInteger(item.parent_id) ?? safePositiveInteger(item.id);
+  const replyButton =
+    replyId == null ? "" : `<button type="button" data-tavern-reply="${replyId}">回复</button>`;
   return `
     <li class="${nested ? "nested" : ""}">
       <strong>${esc(name)}</strong>
       <time>${esc(formatDate(item.created_at))}</time>
       <p>${esc(item.body)}</p>
-      <button type="button" data-tavern-reply="${item.parent_id || item.id}">回复</button>
+      ${replyButton}
     </li>`;
 }
 
-function commentsHtml(items: Comment[], loggedIn: boolean) {
-  const listIn = Array.isArray(items) ? items : [];
-  const roots = listIn.filter((item) => !item.parent_id);
-  const list = roots.flatMap((item) => [item, ...listIn.filter((child) => child.parent_id === item.id)]);
-  const thread = list.length
-    ? `<ul class="tavern-comments">${list.map((item) => commentHtml(item, Boolean(item.parent_id))).join("")}</ul>`
-    : `<p class="tavern-note">还没有评论</p>`;
+function commentsHtml(raw: unknown, loggedIn: boolean, loadFailed = false) {
+  const normalized = normalizeTavernComments(raw);
+  const list = orderTavernComments(normalized.items);
+  const thread = loadFailed
+    ? `<p class="tavern-note">评论暂时无法加载，请稍后重试。</p>`
+    : list.length
+      ? `<ul class="tavern-comments">${list.map((item) => commentHtml(item, Boolean(item.parent_id))).join("")}</ul>`
+      : `<p class="tavern-note">还没有评论</p>`;
+  const truncated = normalized.truncated
+    ? `<p class="tavern-note">评论较多，仅显示前 ${MAX_TAVERN_COMMENTS} 条。</p>`
+    : "";
   const form = loggedIn
     ? `<form class="tavern-comment" id="tavern-comment">
         <p id="tavern-reply" hidden></p>
@@ -247,39 +402,58 @@ function commentsHtml(items: Comment[], loggedIn: boolean) {
         <button type="submit">发表</button>
       </form>`
     : `<p class="tavern-note">登录后可以评论</p>`;
-  return `<section class="tavern-talk"><h2>评论</h2>${thread}${form}</section>`;
+  return `<section class="tavern-talk"><h2>评论</h2>${thread}${truncated}${form}</section>`;
 }
 
 export async function mountTavernArticle(slug: string) {
+  const generation = ++articleRequestGeneration;
+  const expectedRoute = routeKey();
   const host = document.querySelector("#tavern-page");
   if (!host) return;
+  if (!currentArticleRequest(generation, slug, expectedRoute, host)) return;
   try {
-    const [article, comments, session] = await Promise.all([
+    const [article, commentsResult, session] = await Promise.all([
       invoke<ArticleDetail>("site_get", { path: `/articles/${encodeURIComponent(slug)}` }),
-      invoke<Comment[]>("site_get", { path: `/articles/${encodeURIComponent(slug)}/comments` }).catch(() => []),
+      invoke<unknown>("site_get", { path: `/articles/${encodeURIComponent(slug)}/comments` }).then(
+        (value) => ({ ok: true as const, value }),
+        () => ({ ok: false as const, value: null }),
+      ),
       invoke<{ loggedIn?: boolean }>("site_session").catch(() => ({ loggedIn: false })),
     ]);
-    if (!document.querySelector("#tavern-page")) return;
+    if (!currentArticleRequest(generation, slug, expectedRoute, host)) return;
     replyTo = 0;
-    const tags = [...(article.categories || []).map((item) => item.name), ...(article.tags || []).map((item) => item.name)];
-    const body = article.body_format === "html"
-      ? sanitizeHtml(article.body || "")
-      : `<p>${esc(article.body || "暂无正文")}</p>`;
+    const categories = Array.isArray(article.categories)
+      ? article.categories.slice(0, MAX_ARTICLE_TAGS)
+      : [];
+    const articleTags = Array.isArray(article.tags) ? article.tags.slice(0, MAX_ARTICLE_TAGS) : [];
+    const tags = [...categories, ...articleTags]
+      .map((item) => (typeof item?.name === "string" ? item.name.slice(0, 128) : ""))
+      .filter(Boolean)
+      .slice(0, MAX_ARTICLE_TAGS);
+    const boundedBody = boundTavernBody(article.body);
+    const body =
+      article.body_format === "html"
+        ? sanitizeHtml(boundedBody.text)
+        : `<p>${esc(boundedBody.text || "暂无正文")}</p>`;
+    const bodyNote = boundedBody.truncated
+      ? `<p class="tavern-note">正文过长，仅显示前 ${MAX_TAVERN_BODY_CHARS.toLocaleString()} 个字符。</p>`
+      : "";
     host.innerHTML = `
       <a class="tavern-back" href="${BASE}" data-link>战鸽酒馆</a>
-      <h1>${esc(article.title)}</h1>
-      <p class="tavern-meta">${esc([article.author?.display_name, formatDate(article.published_at)].filter(Boolean).join(" · "))}</p>
+      <h1>${esc(limitTavernText(article.title, 512))}</h1>
+      <p class="tavern-meta">${esc([limitTavernText(article.author?.display_name, 128), formatDate(article.published_at)].filter(Boolean).join(" · "))}</p>
       ${tags.length ? `<p class="tavern-tags">${tags.map((name) => `<span>${esc(name)}</span>`).join("")}</p>` : ""}
-      <div class="tavern-body">${body || "<p>暂无正文</p>"}</div>
-      ${commentsHtml(comments || [], Boolean(session.loggedIn))}`;
+      <div class="tavern-body">${body || "<p>暂无正文</p>"}${bodyNote}</div>
+      ${commentsHtml(commentsResult.value, Boolean(session.loggedIn), !commentsResult.ok)}`;
   } catch (error) {
+    if (!currentArticleRequest(generation, slug, expectedRoute, host)) return;
     host.innerHTML = `<a class="tavern-back" href="${BASE}" data-link>战鸽酒馆</a><p class="tavern-note">${esc(error instanceof Error ? error.message : "文章不存在或无法加载")}</p>`;
   }
 }
 
 export function tavernSearchHref(form: HTMLFormElement) {
   const query = listQuery();
-  const q = String(new FormData(form).get("q") || "").trim();
+  const q = limitTavernText(String(new FormData(form).get("q") || ""), 200).trim();
   return tavernListHref({ q, category: query.category, page: 1 });
 }
 
@@ -302,6 +476,11 @@ export function setTavernReply(id: number) {
 }
 
 export async function submitTavernComment(slug: string, form: HTMLFormElement) {
+  const generation = articleRequestGeneration;
+  const expectedRoute = routeKey();
+  const host = document.querySelector("#tavern-page");
+  if (!host || !currentArticleRequest(generation, slug, expectedRoute, host)) return;
+  const isCurrentPage = () => currentArticleRequest(generation, slug, expectedRoute, host);
   const body = String(new FormData(form).get("body") || "").trim();
   const note = form.querySelector("p");
   if (!body) return;
@@ -312,9 +491,11 @@ export async function submitTavernComment(slug: string, form: HTMLFormElement) {
       path: `/articles/${encodeURIComponent(slug)}/comments`,
       body: replyTo ? { body, parent_id: replyTo } : { body },
     });
+    if (!currentArticleRoute(slug, expectedRoute)) return;
     replyTo = 0;
     await mountTavernArticle(slug);
   } catch (error) {
+    if (!isCurrentPage()) return;
     if (button) button.removeAttribute("disabled");
     if (note instanceof HTMLElement) {
       note.hidden = false;

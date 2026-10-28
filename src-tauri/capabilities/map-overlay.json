@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "map-overlay",
+  "description": "地图覆盖层的最小命令权限",
+  "windows": ["map-overlay"],
+  "permissions": [
+    "core:default",
+    "allow-site-get",
+    "allow-shot-state",
+    "allow-shot-settings-get",
+    "allow-log-state",
+    "allow-overlay-get",
+    "allow-overlay-save",
+    "allow-overlay-toggle",
+    "allow-overlay-reset",
+    "allow-overlay-note-map",
+    "allow-overlay-set-guard",
+    "allow-overlay-return-focus"
+  ]
+}

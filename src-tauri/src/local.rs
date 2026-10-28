@@ -1,4 +1,8 @@
 use std::fs;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -7,11 +11,20 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::{AppHandle, Manager};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+};
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
 
 const GAME_EXE: &str = "EscapeFromTarkov.exe";
 const GAME_BE_EXE: &str = "EscapeFromTarkov_BE.exe";
+const MAX_LOG_SESSIONS_PER_READ: usize = 4;
+const MAX_LOG_FILES_PER_SESSION: usize = 8;
+const MAX_LOG_ROOT_ENTRIES: usize = 5_000;
+const MAX_LOG_SESSION_ENTRIES: usize = 10_000;
+const MAX_LOG_FILE_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_LOG_BYTES_PER_READ: u64 = 64 * 1024 * 1024;
 
 static HOST: Mutex<Option<System>> = Mutex::new(None);
 static LAST_SAMPLE: Mutex<Option<Instant>> = Mutex::new(None);
@@ -46,9 +59,13 @@ pub fn usage() -> AppUsage {
     system.refresh_processes(ProcessesToUpdate::All, true);
     let pid = Pid::from_u32(std::process::id());
     let process = system.process(pid);
-    let memory_mb = process.map(|item| item.memory() as f64 / 1024.0 / 1024.0).unwrap_or(0.0);
+    let memory_mb = process
+        .map(|item| item.memory() as f64 / 1024.0 / 1024.0)
+        .unwrap_or(0.0);
     let cpu_percent = process.map(|item| item.cpu_usage()).unwrap_or(0.0);
-    let _ = LAST_SAMPLE.lock().map(|mut slot| *slot = Some(Instant::now()));
+    let _ = LAST_SAMPLE
+        .lock()
+        .map(|mut slot| *slot = Some(Instant::now()));
     AppUsage {
         memory_mb,
         total_gb: system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -64,21 +81,31 @@ fn paths_file(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn get_paths(app: &AppHandle) -> BoundPaths {
     let Ok(path) = paths_file(app) else {
-        return BoundPaths { screenshot_dir: String::new(), log_dir: String::new() };
+        return BoundPaths {
+            screenshot_dir: String::new(),
+            log_dir: String::new(),
+        };
     };
     fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or(BoundPaths { screenshot_dir: String::new(), log_dir: String::new() })
+        .unwrap_or(BoundPaths {
+            screenshot_dir: String::new(),
+            log_dir: String::new(),
+        })
 }
 
-pub fn set_paths(app: &AppHandle, screenshot_dir: String, log_dir: String) -> Result<BoundPaths, String> {
+pub fn set_paths(
+    app: &AppHandle,
+    screenshot_dir: String,
+    log_dir: String,
+) -> Result<BoundPaths, String> {
     let paths = BoundPaths {
         screenshot_dir: screenshot_dir.trim().to_string(),
         log_dir: log_dir.trim().to_string(),
     };
     let text = serde_json::to_string_pretty(&paths).map_err(|err| err.to_string())?;
-    fs::write(paths_file(app)?, text).map_err(|err| err.to_string())?;
+    crate::persist::atomic_write(&paths_file(app)?, text.as_bytes())?;
     Ok(paths)
 }
 
@@ -111,7 +138,10 @@ pub fn open_dir(path: &str) -> Result<(), String> {
     if path.is_empty() || !Path::new(path).is_dir() {
         return Err("目录不存在".into());
     }
-    Command::new("explorer").arg(path).spawn().map_err(|err| err.to_string())?;
+    Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -136,8 +166,12 @@ fn detect_paths() -> Found {
         (None, None) => notes.push("未能自动定位游戏安装目录。".into()),
     }
     Found {
-        screenshot_dir: screenshot.map(|path| path.display().to_string()).unwrap_or_default(),
-        log_dir: logs.map(|path| path.display().to_string()).unwrap_or_default(),
+        screenshot_dir: screenshot
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        log_dir: logs
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
         message: notes.join("\n"),
     }
 }
@@ -186,7 +220,10 @@ fn find_game_from_process() -> Option<PathBuf> {
 
 fn find_game_from_launcher() -> Option<PathBuf> {
     let appdata = std::env::var("APPDATA").ok()?;
-    let path = PathBuf::from(appdata).join("Battlestate Games").join("BsgLauncher").join("settings");
+    let path = PathBuf::from(appdata)
+        .join("Battlestate Games")
+        .join("BsgLauncher")
+        .join("settings");
     let text = fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let mut candidates = Vec::new();
@@ -219,9 +256,13 @@ fn find_game_from_registry() -> Option<PathBuf> {
     for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
         let hive = RegKey::predef(root);
         for sub in keys {
-            let Ok(key) = hive.open_subkey(sub) else { continue };
+            let Ok(key) = hive.open_subkey(sub) else {
+                continue;
+            };
             for name in ["InstallLocation", "InstallPath", "Path"] {
-                let Ok(value) = key.get_value::<String, _>(name) else { continue };
+                let Ok(value) = key.get_value::<String, _>(name) else {
+                    continue;
+                };
                 let path = PathBuf::from(value.trim());
                 if validate_game_path(&path) {
                     return Some(path);
@@ -273,7 +314,12 @@ fn find_logs_dir(game_root: &Path) -> Option<PathBuf> {
             if !path.is_dir() {
                 continue;
             }
-            if entry.file_name().to_string_lossy().eq_ignore_ascii_case("logs") && looks_like_logs(&path) {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("logs")
+                && looks_like_logs(&path)
+            {
                 return Some(path);
             }
             if let Some(found) = walk(&path, depth + 1) {
@@ -309,14 +355,28 @@ pub struct LogBundle {
 pub fn list_log_sessions(app: &AppHandle) -> Result<Vec<LogSession>, String> {
     let root = log_root(app)?;
     let mut sessions = Vec::new();
-    for entry in fs::read_dir(&root).map_err(|err| err.to_string())?.flatten() {
+    for (index, entry) in fs::read_dir(&root)
+        .map_err(|err| err.to_string())?
+        .enumerate()
+    {
+        if index >= MAX_LOG_ROOT_ENTRIES {
+            return Err(format!(
+                "日志目录条目超过 {MAX_LOG_ROOT_ENTRIES} 个，已停止扫描"
+            ));
+        }
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(started) = session_started(&name) else { continue };
-        sessions.push(LogSession { folder: name, started_at: started });
+        let Some(started) = session_started(&name) else {
+            continue;
+        };
+        sessions.push(LogSession {
+            folder: name,
+            started_at: started,
+        });
     }
     if sessions.is_empty() && dir_has_quest_logs(&root) {
         sessions.push(LogSession {
@@ -329,22 +389,66 @@ pub fn list_log_sessions(app: &AppHandle) -> Result<Vec<LogSession>, String> {
 }
 
 pub fn read_log_sessions(app: &AppHandle, folders: Vec<String>) -> Result<Vec<LogBundle>, String> {
-    let root = log_root(app)?.canonicalize().map_err(|err| err.to_string())?;
+    let root = log_root(app)?
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+    if folders.len() > MAX_LOG_SESSIONS_PER_READ {
+        return Err(format!(
+            "一次最多读取 {MAX_LOG_SESSIONS_PER_READ} 场日志，请分批读取"
+        ));
+    }
     let mut bundles = Vec::new();
+    let mut total_bytes = 0u64;
     for folder in folders {
-        let Some(dir) = session_dir(&root, &folder) else { continue };
+        let Some(dir) = session_dir(&root, &folder) else {
+            continue;
+        };
         let mut files = Vec::new();
-        let entries = fs::read_dir(&dir).map_err(|err| err.to_string())?;
-        for entry in entries.flatten() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        for (index, entry) in entries.enumerate() {
+            if index >= MAX_LOG_SESSION_ENTRIES {
+                return Err(format!("日志场次 {folder} 的目录条目过多，已停止读取"));
+            }
+            let Ok(entry) = entry else { continue };
             let path = entry.path();
-            if !path.is_file() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() || file_type.is_symlink() {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
             if !is_quest_log(&name) {
                 continue;
             }
-            let text = read_log_text(&path);
+            if files.len() >= MAX_LOG_FILES_PER_SESSION {
+                return Err(format!("日志场次 {folder} 的任务日志文件过多，已停止读取"));
+            }
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let Some(final_path) = handle_path(&file).ok() else {
+                continue;
+            };
+            if !path_is_within_root(&final_path, &root) {
+                continue;
+            }
+            let metadata = file.metadata().map_err(|err| err.to_string())?;
+            if !metadata.is_file() {
+                continue;
+            }
+            let read_cap = metadata.len().min(MAX_LOG_FILE_BYTES);
+            if total_bytes.saturating_add(read_cap) > MAX_LOG_BYTES_PER_READ {
+                return Err("本次日志读取量超过 64 MiB，请缩小同步日期范围".into());
+            }
+            let text = read_log_text(file, read_cap)?;
+            total_bytes = total_bytes.saturating_add(read_cap);
             files.push(LogFile { name, text });
         }
         files.sort_by(|a, b| a.name.cmp(&b.name));
@@ -361,7 +465,58 @@ fn session_dir(root: &Path, folder: &str) -> Option<PathBuf> {
         return None;
     }
     let dir = root.join(folder).canonicalize().ok()?;
-    if dir.starts_with(root) { Some(dir) } else { None }
+    if dir.starts_with(root) {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+fn handle_path(file: &File) -> Result<PathBuf, String> {
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle() as _,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    } as usize;
+    if length == 0 || length >= buffer.len() {
+        return Err(format!(
+            "读取日志文件实际路径失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let raw = std::ffi::OsString::from_wide(&buffer[..length]);
+    let text = raw.to_string_lossy().into_owned();
+    let normalized = if let Some(unc) = text.strip_prefix("\\\\?\\UNC\\") {
+        PathBuf::from(format!("\\\\{unc}"))
+    } else if let Some(path) = text.strip_prefix("\\\\?\\") {
+        PathBuf::from(path)
+    } else {
+        PathBuf::from(raw)
+    };
+    Ok(normalized)
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    fn comparable(path: &Path) -> String {
+        let text = path.to_string_lossy().replace('/', "\\");
+        let text = text
+            .strip_prefix("\\\\?\\UNC\\")
+            .map(|unc| format!("\\\\{unc}"))
+            .or_else(|| text.strip_prefix("\\\\?\\").map(str::to_string))
+            .unwrap_or(text);
+        text.trim_end_matches('\\').to_lowercase()
+    }
+
+    let path = comparable(path);
+    let root = comparable(root);
+    path == root
+        || path
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
 }
 
 fn log_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -386,13 +541,25 @@ fn session_started(name: &str) -> Option<String> {
     let minute = parts.next()?;
     let second = parts.next()?;
     let digits = [year, month, day, hour, minute, second];
-    if year.len() != 4 || month.len() != 2 || day.len() != 2 || minute.len() != 2 || second.len() != 2 || !(1..=2).contains(&hour.len()) {
+    if year.len() != 4
+        || month.len() != 2
+        || day.len() != 2
+        || minute.len() != 2
+        || second.len() != 2
+        || !(1..=2).contains(&hour.len())
+    {
         return None;
     }
-    if digits.iter().any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit())) {
+    if digits
+        .iter()
+        .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
+    {
         return None;
     }
-    Some(format!("{year}-{month}-{day} {:0>2}:{minute}:{second}", hour))
+    Some(format!(
+        "{year}-{month}-{day} {:0>2}:{minute}:{second}",
+        hour
+    ))
 }
 
 fn is_quest_log(name: &str) -> bool {
@@ -408,35 +575,64 @@ fn is_quest_log(name: &str) -> bool {
 
 fn dir_has_quest_logs(path: &Path) -> bool {
     fs::read_dir(path).ok().is_some_and(|read| {
-        read.flatten().any(|entry| is_quest_log(&entry.file_name().to_string_lossy()))
+        read.take(MAX_LOG_SESSION_ENTRIES)
+            .flatten()
+            .any(|entry| is_quest_log(&entry.file_name().to_string_lossy()))
     })
 }
 
-fn read_log_text(path: &Path) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    const CAP: u64 = 24 * 1024 * 1024;
-    let Ok(meta) = fs::metadata(path) else { return String::new() };
-    let Ok(mut file) = fs::File::open(path) else { return String::new() };
-    let start = meta.len().saturating_sub(CAP);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
+fn read_log_text(mut file: File, cap: u64) -> Result<String, String> {
+    let meta = file.metadata().map_err(|err| err.to_string())?;
+    let start = meta.len().saturating_sub(cap);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|err| err.to_string())?;
     let mut buf = Vec::new();
-    if file.take(CAP).read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
+    file.take(cap)
+        .read_to_end(&mut buf)
+        .map_err(|err| err.to_string())?;
     if start > 0 {
         if let Some(index) = buf.iter().position(|byte| *byte == b'\n') {
             buf.drain(..=index);
         }
     }
-    String::from_utf8_lossy(&buf).into_owned()
+    Ok(decode_log_text(&buf))
+}
+
+fn decode_log_text(mut bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len());
+    while !bytes.is_empty() {
+        match std::str::from_utf8(bytes) {
+            Ok(valid) => {
+                text.push_str(valid);
+                break;
+            }
+            Err(error) => {
+                let valid_len = error.valid_up_to();
+                if valid_len > 0 {
+                    text.push_str(
+                        std::str::from_utf8(&bytes[..valid_len]).expect("validated UTF-8 prefix"),
+                    );
+                }
+                let skip = error.error_len().unwrap_or(bytes.len() - valid_len).max(1);
+                text.push('?');
+                bytes = &bytes[(valid_len + skip).min(bytes.len())..];
+            }
+        }
+    }
+    text
 }
 
 fn looks_like_logs(path: &Path) -> bool {
     path.is_dir()
         && fs::read_dir(path).ok().is_some_and(|read| {
-            read.flatten().any(|entry| entry.path().is_dir() || entry.file_name().to_string_lossy().to_lowercase().ends_with(".log"))
+            read.flatten().any(|entry| {
+                entry.path().is_dir()
+                    || entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .ends_with(".log")
+            })
         })
 }
 
@@ -464,5 +660,49 @@ mod tests {
         assert!(session_dir(&canon, r"..\..").is_none());
         assert_eq!(session_dir(&canon, "").unwrap(), canon);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_log_file_outside_bound_root() {
+        let base =
+            std::env::temp_dir().join(format!("zhange-log-file-boundary-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("logs");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("application.log"), "inside").unwrap();
+        fs::write(base.join("outside.log"), "outside").unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+
+        let inside = File::open(root.join("application.log")).unwrap();
+        let outside = File::open(base.join("outside.log")).unwrap();
+        assert!(path_is_within_root(
+            &handle_path(&inside).unwrap(),
+            &canonical_root
+        ));
+        assert!(!path_is_within_root(
+            &handle_path(&outside).unwrap(),
+            &canonical_root
+        ));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bounded_log_read_keeps_only_a_tail() {
+        let path = std::env::temp_dir().join(format!("zhange-log-tail-{}.log", std::process::id()));
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+        let text = read_log_text(File::open(&path).unwrap(), 8).unwrap();
+        assert_eq!(text, "three\n");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_log_bytes_do_not_expand_past_input_size() {
+        let bytes = [0xff; 256];
+        let text = decode_log_text(&bytes);
+        assert_eq!(text, "?".repeat(bytes.len()));
+        assert!(text.len() <= bytes.len());
     }
 }

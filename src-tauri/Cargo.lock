@@ -5812,7 +5812,7 @@ dependencies = [
 
 [[package]]
 name = "zhange-app"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -5828,6 +5828,7 @@ dependencies = [
  "tokio-tungstenite",
  "webview2-com",
  "windows-core 0.61.2",
+ "windows-sys 0.61.2",
  "winreg",
 ]
 

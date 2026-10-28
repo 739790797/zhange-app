@@ -4,7 +4,14 @@ const GROUPS = [
   ["labyrinth", "the-labyrinth"],
   ["night-factory", "factory-night", "factory4-night"],
   ["factory", "factory-day", "factory4-day"],
-  ["ground-zero", "ground-zero-21", "ground-zero-tutorial", "sandbox", "sandbox-high", "groundzero"],
+  [
+    "ground-zero",
+    "ground-zero-21",
+    "ground-zero-tutorial",
+    "sandbox",
+    "sandbox-high",
+    "groundzero",
+  ],
   ["customs", "bigmap"],
   ["reserve", "rezerv-base", "rezervbase"],
   ["woods", "forest"],
@@ -33,7 +40,10 @@ const LABEL: Record<string, string> = {
 };
 
 export function mapKey(value: string) {
-  return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
 }
 
 function groupOf(key: string) {
@@ -71,7 +81,10 @@ export function mapPhrase(value: string, empty = "") {
   const text = value.trim();
   if (!text) return empty;
   if (/[\u4e00-\u9fff]/.test(text)) return text;
-  const parts = text.split(/[、,，/|;]+/).map((part) => part.trim()).filter(Boolean);
+  const parts = text
+    .split(/[、,，/|;]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
   if (parts.length > 1) {
     const titled = parts.map((part) => mapTitle(part, "", "")).filter(Boolean);
     return titled.join("、") || text;
@@ -81,5 +94,8 @@ export function mapPhrase(value: string, empty = "") {
 
 export function findMap<T extends { slug: string }>(slug: string, options: T[]) {
   const key = mapKey(slug);
-  return options.find((item) => mapKey(item.slug) === key) || options.find((item) => sameMap(item.slug, slug));
+  return (
+    options.find((item) => mapKey(item.slug) === key) ||
+    options.find((item) => sameMap(item.slug, slug))
+  );
 }

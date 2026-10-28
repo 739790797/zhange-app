@@ -18,26 +18,44 @@ jobs:
   exe:
     name: zhange-app.exe
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           targets: i686-pc-windows-msvc
 
-      - uses: swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
           workspaces: src-tauri -> target
 
       - run: npm ci
 
+      - name: Audit npm dependencies
+        run: npm audit
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Run frontend unit tests
+        run: npm test
+
       - name: Build single executable
         run: npm run tauri build -- --no-bundle --target i686-pc-windows-msvc
+
+      - name: Run Rust unit tests
+        run: cargo test --target i686-pc-windows-msvc --manifest-path src-tauri/Cargo.toml
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Collect executable
         shell: pwsh
@@ -46,42 +64,76 @@ jobs:
           if (-not (Test-Path $src)) { throw "找不到 $src" }
           New-Item -ItemType Directory -Force dist-exe | Out-Null
           Copy-Item $src "dist-exe/zhange-app.exe"
+          $licenseDir = "dist-exe/licenses/fonts"
+          New-Item -ItemType Directory -Force $licenseDir | Out-Null
+          Copy-Item "vendor/zhange-base/design-system/licenses/fonts/*.txt" $licenseDir
+          $expected = @("IBM-Plex-OFL.txt", "Noto-Sans-SC-OFL.txt", "Rajdhani-OFL.txt")
+          foreach ($name in $expected) {
+            if (-not (Test-Path (Join-Path $licenseDir $name))) { throw "缺少字体许可证 $name" }
+          }
+          $package = "dist-exe/zhange-app-windows-i686.zip"
+          Compress-Archive -Path "dist-exe/zhange-app.exe", "dist-exe/licenses" -DestinationPath $package -Force
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($package)
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+            foreach ($name in $expected) {
+              if (-not ($entries -contains "licenses/fonts/$name")) { throw "发布压缩包缺少字体许可证 $name" }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zhange-app.exe
-          path: dist-exe/zhange-app.exe
+          path: |
+            dist-exe/zhange-app.exe
+            dist-exe/zhange-app-windows-i686.zip
+            dist-exe/licenses/fonts/*.txt
           if-no-files-found: error
 
   release:
     name: publish
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: exe
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v4
+      - name: Validate release tag
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          expected="v${version}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            echo "::error::Releases can only be published from a version tag."
+            exit 1
+          fi
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must use vMAJOR.MINOR.PATCH format."
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not match configured version ${expected}."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: zhange-app.exe
           path: dist-exe
 
-      - name: Resolve tag
-        id: tag
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-            echo "name=v${version}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231 # v3.0.3
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          files: dist-exe/zhange-app.exe
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist-exe/zhange-app.exe
+            dist-exe/zhange-app-windows-i686.zip
+            dist-exe/licenses/fonts/*.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

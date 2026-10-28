@@ -2,7 +2,10 @@ import { pushNav } from "./navHistory";
 import { spin } from "./spinner";
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 export function listIcon(src = "") {
@@ -55,7 +58,8 @@ export function repaintList(host: HTMLElement, searchId: string, draw: () => voi
   const form = host.querySelector(`#${searchId}`);
   const active = document.activeElement;
   const typing = active instanceof HTMLInputElement && Boolean(form?.contains(active));
-  const pos = active instanceof HTMLInputElement && form?.contains(active) ? active.selectionStart : null;
+  const pos =
+    active instanceof HTMLInputElement && form?.contains(active) ? active.selectionStart : null;
   const top = host.querySelector<HTMLElement>(".tarkov-list-side")?.scrollTop ?? 0;
   draw();
   const side = host.querySelector<HTMLElement>(".tarkov-list-side");
@@ -67,7 +71,11 @@ export function repaintList(host: HTMLElement, searchId: string, draw: () => voi
   return true;
 }
 
-export function bindListSearch(host: ParentNode, searchId: string, onInput: (value: string) => void) {
+export function bindListSearch(
+  host: ParentNode,
+  searchId: string,
+  onInput: (value: string) => void,
+) {
   const form = host.querySelector(`#${searchId}`);
   form?.addEventListener("submit", (event) => event.preventDefault());
   form?.querySelector<HTMLInputElement>("[name=q]")?.addEventListener("input", (event) => {
@@ -85,7 +93,11 @@ export function stayOnList(host: ParentNode | null, href: string, base: string) 
   const current = host.querySelector<HTMLAnchorElement>(".tarkov-list-item.on");
   const raw = pathOnly === base ? "" : pathOnly.slice(base.length + 1).split("/")[0];
   let slug = raw;
-  try { slug = raw ? decodeURIComponent(raw) : ""; } catch { slug = raw; }
+  try {
+    slug = raw ? decodeURIComponent(raw) : "";
+  } catch {
+    slug = raw;
+  }
   return { slug, same: current?.getAttribute("href") === pathOnly };
 }
 
@@ -101,7 +113,9 @@ export function listFrame(options: {
   const search = options.search
     ? `<form id="${esc(options.search.id)}"><input class="tarkov-list-search" name="q" value="${esc(options.search.value)}" placeholder="${esc(options.search.placeholder)}" aria-label="${esc(options.search.label || "搜索")}" /></form>`
     : "";
-  const rail = options.rail ? `<aside class="tarkov-list-side lobby-rail">${options.rail}</aside>` : "";
+  const rail = options.rail
+    ? `<aside class="tarkov-list-side lobby-rail">${options.rail}</aside>`
+    : "";
   return `
     <div class="tarkov-list-layout${options.layoutClass ? ` ${options.layoutClass}` : ""}">
       <aside class="tarkov-list-side">${options.side}</aside>

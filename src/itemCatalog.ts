@@ -1,3 +1,4 @@
+import { invoke } from "./tauriBridge";
 import { isPending, spin } from "./spinner";
 
 type Cat = { id: string; order: number; label: string; slug: string; children: Cat[] };
@@ -21,9 +22,28 @@ export type CatalogSpec = { slug: string; child: string };
 const PAGE_SIZES = [20, 50, 100];
 const CLIENT_KINDS = new Set(["rigs", "armors"]);
 const NUMERIC = new Set([
-  "slots", "weight", "slotRatio", "pricePerSlot", "class", "durability", "price", "fuse", "fragments",
-  "energy", "hydration", "useTime", "uses", "ergo", "ergoPenalty", "speedPenalty", "turnPenalty",
-  "recoil", "loudness", "hp", "slashDamage", "stabDamage",
+  "slots",
+  "weight",
+  "slotRatio",
+  "pricePerSlot",
+  "class",
+  "durability",
+  "price",
+  "fuse",
+  "fragments",
+  "energy",
+  "hydration",
+  "useTime",
+  "uses",
+  "ergo",
+  "ergoPenalty",
+  "speedPenalty",
+  "turnPenalty",
+  "recoil",
+  "loudness",
+  "hp",
+  "slashDamage",
+  "stabDamage",
 ]);
 const COLUMNS: Record<string, string[]> = {
   backpacks: ["name", "grid", "slots", "weight", "slotRatio", "pricePerSlot", "price"],
@@ -53,12 +73,37 @@ const COLUMNS: Record<string, string[]> = {
 };
 const DEFAULT_COLUMNS = ["name", "grid", "weight", "price"];
 const COLUMN_LABEL: Record<string, string> = {
-  name: "名称", grid: "格子", slots: "内部格", weight: "重量", slotRatio: "格效", pricePerSlot: "每格价",
-  class: "等级", zones: "防护部位", durability: "耐久", ricochet: "跳弹", ergoPenalty: "人机惩罚",
-  speedPenalty: "移速惩罚", turnPenalty: "转向", blocksHeadset: "挡耳机", blindness: "闪光防护",
-  distance: "听力", fuse: "引信", fragments: "破片", radius: "半径", grenadeType: "类型",
-  energy: "能量", hydration: "水分", useTime: "使用", uses: "次数", ergo: "人机", recoil: "后座",
-  loudness: "响度", hp: "生命", slashDamage: "劈砍", stabDamage: "刺击", price: "价格",
+  name: "名称",
+  grid: "格子",
+  slots: "内部格",
+  weight: "重量",
+  slotRatio: "格效",
+  pricePerSlot: "每格价",
+  class: "等级",
+  zones: "防护部位",
+  durability: "耐久",
+  ricochet: "跳弹",
+  ergoPenalty: "人机惩罚",
+  speedPenalty: "移速惩罚",
+  turnPenalty: "转向",
+  blocksHeadset: "挡耳机",
+  blindness: "闪光防护",
+  distance: "听力",
+  fuse: "引信",
+  fragments: "破片",
+  radius: "半径",
+  grenadeType: "类型",
+  energy: "能量",
+  hydration: "水分",
+  useTime: "使用",
+  uses: "次数",
+  ergo: "人机",
+  recoil: "后座",
+  loudness: "响度",
+  hp: "生命",
+  slashDamage: "劈砍",
+  stabDamage: "刺击",
+  price: "价格",
 };
 const KIND_BY_ID: Record<string, string> = {
   "5b5f6f3c86f774094242ef87": "headsets",
@@ -75,17 +120,60 @@ const KIND_BY_ID: Record<string, string> = {
   "5b5f731a86f774093e6cb4f9": "suppressors",
 };
 const ZONES: Record<string, string> = {
-  head: "头部", headcommon: "头部", parietalhead: "头顶", backhead: "后脑", ears: "耳朵", eyes: "眼睛",
-  jaw: "下颌", neckfront: "喉咙", neckback: "后颈", throat: "喉咙", ribcageup: "上胸", ribcagelow: "下胸",
-  spinetop: "上背", spinedown: "下背", leftsidechestup: "左上侧胸", leftsidechestdown: "左下侧胸",
-  rightsidechestup: "右上侧胸", rightsidechestdown: "右下侧胸", pelvis: "骨盆", pelvisback: "臀部",
-  leftupperarm: "左上臂", leftforearm: "左前臂", rightupperarm: "右上臂", rightforearm: "右前臂",
-  leftthigh: "左大腿", leftcalf: "左小腿", rightthigh: "右大腿", rightcalf: "右小腿", chest: "胸部",
-  thorax: "胸部", stomach: "腹部", groin: "裆部", back: "背部", sides: "侧面", arms: "手臂",
-  leftarm: "左臂", rightarm: "右臂", leftleg: "左腿", rightleg: "右腿", front_plate: "前胸",
-  back_plate: "后背", left_side_plate: "左侧", right_side_plate: "右侧", front: "前胸", frontplate: "前胸",
-  backplate: "后背", helmet_top: "盔顶", helmet_back: "盔后", helmet_eyes: "眼部", helmet_jaw: "下颌",
-  helmet_ears: "耳部", shoulder_l: "左肩", shoulder_r: "右肩", collar: "衣领",
+  head: "头部",
+  headcommon: "头部",
+  parietalhead: "头顶",
+  backhead: "后脑",
+  ears: "耳朵",
+  eyes: "眼睛",
+  jaw: "下颌",
+  neckfront: "喉咙",
+  neckback: "后颈",
+  throat: "喉咙",
+  ribcageup: "上胸",
+  ribcagelow: "下胸",
+  spinetop: "上背",
+  spinedown: "下背",
+  leftsidechestup: "左上侧胸",
+  leftsidechestdown: "左下侧胸",
+  rightsidechestup: "右上侧胸",
+  rightsidechestdown: "右下侧胸",
+  pelvis: "骨盆",
+  pelvisback: "臀部",
+  leftupperarm: "左上臂",
+  leftforearm: "左前臂",
+  rightupperarm: "右上臂",
+  rightforearm: "右前臂",
+  leftthigh: "左大腿",
+  leftcalf: "左小腿",
+  rightthigh: "右大腿",
+  rightcalf: "右小腿",
+  chest: "胸部",
+  thorax: "胸部",
+  stomach: "腹部",
+  groin: "裆部",
+  back: "背部",
+  sides: "侧面",
+  arms: "手臂",
+  leftarm: "左臂",
+  rightarm: "右臂",
+  leftleg: "左腿",
+  rightleg: "右腿",
+  front_plate: "前胸",
+  back_plate: "后背",
+  left_side_plate: "左侧",
+  right_side_plate: "右侧",
+  front: "前胸",
+  frontplate: "前胸",
+  backplate: "后背",
+  helmet_top: "盔顶",
+  helmet_back: "盔后",
+  helmet_eyes: "眼部",
+  helmet_jaw: "下颌",
+  helmet_ears: "耳部",
+  shoulder_l: "左肩",
+  shoulder_r: "右肩",
+  collar: "衣领",
 };
 const PLATES: [RegExp, string][] = [
   [/_side_left_high$/i, "左侧插板（高）"],
@@ -97,8 +185,13 @@ const PLATES: [RegExp, string][] = [
 ];
 const RICOCHET: Record<string, string> = { high: "高", medium: "中", low: "低", none: "无" };
 const GRENADE: Record<string, string> = {
-  frag: "破片", fragmentation: "破片", flash: "闪光", flashbang: "闪光",
-  smoke: "烟雾", stun: "震撼", impact: "触发",
+  frag: "破片",
+  fragmentation: "破片",
+  flash: "闪光",
+  flashbang: "闪光",
+  smoke: "烟雾",
+  stun: "震撼",
+  impact: "触发",
 };
 
 function wordLabel(value: string, table: Record<string, string>) {
@@ -247,7 +340,8 @@ function placeSidebar() {
   if (anchor) {
     const node = side.querySelector<HTMLElement>(`[data-catalog-node="${CSS.escape(anchor.id)}"]`);
     if (node) {
-      const delta = node.getBoundingClientRect().top - side.getBoundingClientRect().top - anchor.offset;
+      const delta =
+        node.getBoundingClientRect().top - side.getBoundingClientRect().top - anchor.offset;
       side.scrollTop += delta;
     }
   } else {
@@ -257,11 +351,17 @@ function placeSidebar() {
 }
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function ordered(nodes: Cat[]) {
-  return nodes.map((item, index) => ({ item, index })).sort((a, b) => a.item.order - b.item.order || a.index - b.index).map((row) => row.item);
+  return nodes
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => a.item.order - b.item.order || a.index - b.index)
+    .map((row) => row.item);
 }
 
 function findChild(nodes: Cat[], id: string): Cat | null {
@@ -391,12 +491,6 @@ export function catalogShell() {
   return `<section class="catalog" id="catalog">${spin("正在读取物品")}</section>`;
 }
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
-
 function propsOf(item: Item) {
   return item.properties && typeof item.properties === "object" ? item.properties : {};
 }
@@ -473,12 +567,22 @@ function zoneName(value: string) {
   const text = value.trim();
   if (!text) return "";
   if (/[\u3400-\u9fff]/.test(text)) return text;
-  const cleaned = text.replace(/^(collider\s*type|armor\s*zone|ebodypartcollidertype)[.\s:_-]*/i, "").trim();
+  const cleaned = text
+    .replace(/^(collider\s*type|armor\s*zone|ebodypartcollidertype)[.\s:_-]*/i, "")
+    .trim();
   const lookup = (raw: string) => {
     const spaced = raw.toLowerCase().replace(/[\s-]+/g, "_");
-    return ZONES[raw] || ZONES[raw.toLowerCase()] || ZONES[spaced] || ZONES[spaced.replace(/_/g, "")];
+    return (
+      ZONES[raw] || ZONES[raw.toLowerCase()] || ZONES[spaced] || ZONES[spaced.replace(/_/g, "")]
+    );
   };
-  return lookup(cleaned) || PLATES.find(([pattern]) => pattern.test(cleaned))?.[1] || lookup(text) || cleaned || text;
+  return (
+    lookup(cleaned) ||
+    PLATES.find(([pattern]) => pattern.test(cleaned))?.[1] ||
+    lookup(text) ||
+    cleaned ||
+    text
+  );
 }
 
 function zoneText(value: unknown) {
@@ -530,10 +634,14 @@ function cell(column: string, item: Item) {
       const current = numProp(body, "durability");
       const max = numProp(body, "maxDurability");
       if (current == null && max == null) return "—";
-      return current != null && max != null && current !== max ? `${current} / ${max}` : plain(current ?? max);
+      return current != null && max != null && current !== max
+        ? `${current} / ${max}`
+        : plain(current ?? max);
     }
     case "ricochet":
-      return plain(wordLabel(textProp(body, "ricochetY"), RICOCHET) || numProp(body, "ricochetChance"));
+      return plain(
+        wordLabel(textProp(body, "ricochetY"), RICOCHET) || numProp(body, "ricochetChance"),
+      );
     case "grenadeType":
       return plain(wordLabel(textProp(body, "type"), GRENADE));
     case "turnPenalty":
@@ -617,7 +725,10 @@ function compare(left: Item, right: Item, column: string, dir: "ascend" | "desce
   if (emptyA && emptyB) return String(left.id).localeCompare(String(right.id));
   if (emptyA) return 1;
   if (emptyB) return -1;
-  let delta = typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b), "zh");
+  let delta =
+    typeof a === "number" && typeof b === "number"
+      ? a - b
+      : String(a).localeCompare(String(b), "zh");
   if (delta === 0) delta = String(left.id).localeCompare(String(right.id));
   return dir === "descend" ? -delta : delta;
 }
@@ -641,16 +752,21 @@ function allButton(spec: CatalogSpec) {
 }
 
 function treeNodes(spec: CatalogSpec, nodes: Cat[], depth: number, rootSlug: string): string {
-  return ordered(nodes).map((node) => {
-    const kids = node.children;
-    const expanded = open.has(node.id);
-    const caret = kids.length
-      ? `<button type="button" class="catalog-caret${expanded ? " open" : ""}" data-catalog-toggle="${esc(node.id)}" aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "收起" : "展开"}${esc(node.label)}"></button>`
-      : `<span class="catalog-caret-slot"></span>`;
-    const button = `<button type="button" class="catalog-cat${spec.child === node.id || (depth === 0 && !spec.child && node.slug === spec.slug) ? " on" : ""}" data-catalog="${esc(depth === 0 ? node.slug : rootSlug)}" data-catalog-node="${esc(node.id)}"${depth === 0 ? "" : ` data-catalog-child="${esc(node.id)}"`}>${catIcon(node.id)}<span>${esc(node.label)}</span></button>`;
-    const nested = expanded && kids.length ? `<div class="catalog-kids">${treeNodes(spec, kids, depth + 1, depth === 0 ? node.slug : rootSlug)}</div>` : "";
-    return `<div class="catalog-node"><div class="catalog-cat-row">${caret}${button}</div>${nested}</div>`;
-  }).join("");
+  return ordered(nodes)
+    .map((node) => {
+      const kids = node.children;
+      const expanded = open.has(node.id);
+      const caret = kids.length
+        ? `<button type="button" class="catalog-caret${expanded ? " open" : ""}" data-catalog-toggle="${esc(node.id)}" aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "收起" : "展开"}${esc(node.label)}"></button>`
+        : `<span class="catalog-caret-slot"></span>`;
+      const button = `<button type="button" class="catalog-cat${spec.child === node.id || (depth === 0 && !spec.child && node.slug === spec.slug) ? " on" : ""}" data-catalog="${esc(depth === 0 ? node.slug : rootSlug)}" data-catalog-node="${esc(node.id)}"${depth === 0 ? "" : ` data-catalog-child="${esc(node.id)}"`}>${catIcon(node.id)}<span>${esc(node.label)}</span></button>`;
+      const nested =
+        expanded && kids.length
+          ? `<div class="catalog-kids">${treeNodes(spec, kids, depth + 1, depth === 0 ? node.slug : rootSlug)}</div>`
+          : "";
+      return `<div class="catalog-node"><div class="catalog-cat-row">${caret}${button}</div>${nested}</div>`;
+    })
+    .join("");
 }
 
 function sidebar(spec: CatalogSpec) {
@@ -660,8 +776,10 @@ function sidebar(spec: CatalogSpec) {
 function visibleRows(kind: string, source: Item[], client: boolean) {
   if (!client) return { rows: source, total: loaded?.total ?? source.length };
   let rows = source;
-  if (kind === "rigs" && rig !== "all") rows = rows.filter((item) => armored(item) === (rig === "armored"));
-  if (sortKey && sortable(kind, sortKey)) rows = [...rows].sort((left, right) => compare(left, right, sortKey, sortDir));
+  if (kind === "rigs" && rig !== "all")
+    rows = rows.filter((item) => armored(item) === (rig === "armored"));
+  if (sortKey && sortable(kind, sortKey))
+    rows = [...rows].sort((left, right) => compare(left, right, sortKey, sortDir));
   const total = rows.length;
   const pages = Math.max(1, Math.ceil(total / pageSize));
   if (page > pages) page = pages;
@@ -672,27 +790,38 @@ function visibleRows(kind: string, source: Item[], client: boolean) {
 function table(spec: CatalogSpec, source: Item[] | null, client: boolean, note: string) {
   const kind = kindOf(spec);
   const columns = columnsOf(kind);
-  const head = columns.map((column) => {
-    const title = columnTitle(kind, column);
-    const mark = sortKey === column ? (sortDir === "descend" ? " ↓" : " ↑") : "";
-    const label = sortable(kind, column) ? `<button type="button" data-catalog-sort="${esc(column)}">${esc(title)}${mark}</button>` : esc(title);
-    return `<th class="${NUMERIC.has(column) ? "num" : ""}">${label}</th>`;
-  }).join("");
-  if (source == null) return `<div class="catalog-panel">${isPending(note) ? spin(note) : `<p class="catalog-empty">${esc(note)}</p>`}</div>`;
+  const head = columns
+    .map((column) => {
+      const title = columnTitle(kind, column);
+      const mark = sortKey === column ? (sortDir === "descend" ? " ↓" : " ↑") : "";
+      const label = sortable(kind, column)
+        ? `<button type="button" data-catalog-sort="${esc(column)}">${esc(title)}${mark}</button>`
+        : esc(title);
+      return `<th class="${NUMERIC.has(column) ? "num" : ""}">${label}</th>`;
+    })
+    .join("");
+  if (source == null)
+    return `<div class="catalog-panel">${isPending(note) ? spin(note) : `<p class="catalog-empty">${esc(note)}</p>`}</div>`;
   const shown = visibleRows(kind, source, client);
-  const body = shown.rows.map((item) => {
-    const id = String(item.id || "").trim();
-    const name = String(item.name || item.short_name || id).trim();
-    const icon = iconOf(String(item.icon_link || ""), id);
-    const cells = columns.map((column) => {
-      if (column === "name") {
-        return `<td><button type="button" class="catalog-name" data-wiki="item" data-wiki-id="${esc(id)}">${icon ? `<img src="${esc(icon)}" alt="" />` : "<i></i>"}<span>${esc(name)}</span></button></td>`;
-      }
-      return `<td class="${NUMERIC.has(column) ? "num" : ""}">${esc(cell(column, item))}</td>`;
-    }).join("");
-    return `<tr>${cells}</tr>`;
-  }).join("");
-  const empty = body ? "" : `<tr><td colspan="${columns.length}"><p class="catalog-empty">当前筛选下无物品</p></td></tr>`;
+  const body = shown.rows
+    .map((item) => {
+      const id = String(item.id || "").trim();
+      const name = String(item.name || item.short_name || id).trim();
+      const icon = iconOf(String(item.icon_link || ""), id);
+      const cells = columns
+        .map((column) => {
+          if (column === "name") {
+            return `<td><button type="button" class="catalog-name" data-wiki="item" data-wiki-id="${esc(id)}">${icon ? `<img src="${esc(icon)}" alt="" />` : "<i></i>"}<span>${esc(name)}</span></button></td>`;
+          }
+          return `<td class="${NUMERIC.has(column) ? "num" : ""}">${esc(cell(column, item))}</td>`;
+        })
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+  const empty = body
+    ? ""
+    : `<tr><td colspan="${columns.length}"><p class="catalog-empty">当前筛选下无物品</p></td></tr>`;
   return `<div class="catalog-panel"><table class="catalog-table"><thead><tr>${head}</tr></thead><tbody>${body || empty}</tbody></table></div>${pager(shown.total)}`;
 }
 
@@ -700,16 +829,28 @@ function pager(total: number) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const start = total ? (page - 1) * pageSize + 1 : 0;
   const end = Math.min(total, page * pageSize);
-  const sizes = PAGE_SIZES.map((size) => `<option value="${size}"${size === pageSize ? " selected" : ""}>${size}</option>`).join("");
+  const sizes = PAGE_SIZES.map(
+    (size) => `<option value="${size}"${size === pageSize ? " selected" : ""}>${size}</option>`,
+  ).join("");
   return `<div class="catalog-pager"><button type="button" data-catalog-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><span>${start}–${end} / ${total}</span><label>每页 <select data-catalog-size aria-label="每页数量">${sizes}</select></label><button type="button" data-catalog-page="${page + 1}" ${page >= pages ? "disabled" : ""}>下一页</button></div>`;
 }
 
 function layout(spec: CatalogSpec, main: string, meta: string) {
   const { node, root } = selection(spec);
   const childLabel = root && node && node.id !== root.id ? node.label : "";
-  const kinds = kindOf(spec) === "rigs"
-    ? `<div class="catalog-kinds" role="group" aria-label="胸挂类型">${[["all", "全部"], ["plain", "胸挂"], ["armored", "防弹胸挂"]].map(([id, label]) => `<button type="button" data-catalog-rig="${id}" class="${rig === id ? "on" : ""}" aria-pressed="${rig === id ? "true" : "false"}">${label}</button>`).join("")}</div>`
-    : "";
+  const kinds =
+    kindOf(spec) === "rigs"
+      ? `<div class="catalog-kinds" role="group" aria-label="胸挂类型">${[
+          ["all", "全部"],
+          ["plain", "胸挂"],
+          ["armored", "防弹胸挂"],
+        ]
+          .map(
+            ([id, label]) =>
+              `<button type="button" data-catalog-rig="${id}" class="${rig === id ? "on" : ""}" aria-pressed="${rig === id ? "true" : "false"}">${label}</button>`,
+          )
+          .join("")}</div>`
+      : "";
   return `
     <div class="catalog-layout">
       <aside class="catalog-side">${sidebar(spec)}</aside>
@@ -730,8 +871,16 @@ function paint(spec: CatalogSpec, data: Loaded | null, note = "") {
   const side = host.querySelector<HTMLElement>(".catalog-side");
   if (side && !sideAnchor) sideScroll = side.scrollTop;
   const pending = !data && isPending(note || "正在读取物品…");
-  const meta = data ? `共 ${data.client ? visibleRows(kindOf(spec), data.items, true).total : data.total} 件` : pending ? "" : note;
-  const main = data ? table(spec, data.items, data.client, "") : pending ? `<div class="catalog-panel">${spin(note || "正在读取物品")}</div>` : `<div class="catalog-panel"><p class="catalog-empty">${esc(note)}</p></div>`;
+  const meta = data
+    ? `共 ${data.client ? visibleRows(kindOf(spec), data.items, true).total : data.total} 件`
+    : pending
+      ? ""
+      : note;
+  const main = data
+    ? table(spec, data.items, data.client, "")
+    : pending
+      ? `<div class="catalog-panel">${spin(note || "正在读取物品")}</div>`
+      : `<div class="catalog-panel"><p class="catalog-empty">${esc(note)}</p></div>`;
   host.innerHTML = layout(spec, main, data ? meta : note);
   host.scrollTop = catalogScroll;
   placeSidebar();
@@ -771,20 +920,24 @@ function bind(host: HTMLElement, spec: CatalogSpec) {
     button.addEventListener("click", () => {
       if (button.disabled) return;
       page = Math.max(1, Number(button.dataset.catalogPage) || 1);
-      if (loaded?.client && loaded.key === `${spec.slug}/${spec.child}` && loaded.query === query) paint(spec, loaded);
+      if (loaded?.client && loaded.key === `${spec.slug}/${spec.child}` && loaded.query === query)
+        paint(spec, loaded);
       else void mountCatalog(spec);
     });
   });
-  host.querySelector<HTMLSelectElement>("[data-catalog-size]")?.addEventListener("change", (event) => {
-    const select = event.currentTarget;
-    if (!(select instanceof HTMLSelectElement)) return;
-    const next = Number(select.value);
-    if (!PAGE_SIZES.includes(next) || next === pageSize) return;
-    pageSize = next;
-    page = 1;
-    if (loaded?.client && loaded.key === `${spec.slug}/${spec.child}` && loaded.query === query) paint(spec, loaded);
-    else void mountCatalog(spec);
-  });
+  host
+    .querySelector<HTMLSelectElement>("[data-catalog-size]")
+    ?.addEventListener("change", (event) => {
+      const select = event.currentTarget;
+      if (!(select instanceof HTMLSelectElement)) return;
+      const next = Number(select.value);
+      if (!PAGE_SIZES.includes(next) || next === pageSize) return;
+      pageSize = next;
+      page = 1;
+      if (loaded?.client && loaded.key === `${spec.slug}/${spec.child}` && loaded.query === query)
+        paint(spec, loaded);
+      else void mountCatalog(spec);
+    });
   host.querySelectorAll<HTMLButtonElement>("[data-catalog-sort]").forEach((button) => {
     button.addEventListener("click", () => {
       const column = button.dataset.catalogSort || "";
@@ -822,7 +975,8 @@ function bind(host: HTMLElement, spec: CatalogSpec) {
       } else {
         openBranch(id);
       }
-      if (loaded && loaded.key === `${spec.slug}/${spec.child}` && loaded.query === query) paint(spec, loaded);
+      if (loaded && loaded.key === `${spec.slug}/${spec.child}` && loaded.query === query)
+        paint(spec, loaded);
       else paint(spec, null, "正在读取物品…");
     });
   });
@@ -843,7 +997,9 @@ async function fetchItems(ids: string[], text: string, index: number, size: numb
   if (text) params.set("q", text);
   params.set("page", String(index));
   params.set("page_size", String(size));
-  return invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/items?${params.toString()}` });
+  return invoke<Record<string, unknown>>("site_get", {
+    path: `/guides/tarkov/items?${params.toString()}`,
+  });
 }
 
 export async function mountCatalog(spec: CatalogSpec, local = false) {
@@ -878,8 +1034,18 @@ export async function mountCatalog(spec: CatalogSpec, local = false) {
       const first = await fetchItems(ids, query, 1, 100);
       if (token !== seq) return;
       const count = Number(first.item_count);
-      const pages = Math.max(1, Math.ceil((Number.isFinite(count) ? count : readItems(first).length) / 100));
-      const rest = pages > 1 ? await Promise.all(Array.from({ length: pages - 1 }, (_, index) => fetchItems(ids, query, index + 2, 100))) : [];
+      const pages = Math.max(
+        1,
+        Math.ceil((Number.isFinite(count) ? count : readItems(first).length) / 100),
+      );
+      const rest =
+        pages > 1
+          ? await Promise.all(
+              Array.from({ length: pages - 1 }, (_, index) =>
+                fetchItems(ids, query, index + 2, 100),
+              ),
+            )
+          : [];
       if (token !== seq) return;
       items = readItems(first).concat(...rest.map(readItems));
       total = Number.isFinite(count) ? count : items.length;

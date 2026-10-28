@@ -1,3 +1,4 @@
+import { invoke } from "./tauriBridge";
 import { mapTitle, sameMap } from "./mapNames";
 
 type Goon = { mapSlug: string; seenAt: string };
@@ -5,12 +6,6 @@ type Goon = { mapSlug: string; seenAt: string };
 let goon: Goon | null = null;
 let timer = 0;
 let painter: (() => void) | null = null;
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
 
 function ago(value: string) {
   const time = Date.parse(value);
@@ -48,7 +43,9 @@ export function paintGoonBars(nameOf: (slug: string) => string) {
   const here = slug ? goonHint() : "";
   document.querySelectorAll<HTMLButtonElement>(".goon-bar").forEach((node) => {
     const onMap = node.classList.contains("map-goon");
-    const viewed = onMap ? node.closest(".map-app")?.querySelector("#map-root")?.getAttribute("data-slug") || "" : "";
+    const viewed = onMap
+      ? node.closest(".map-app")?.querySelector("#map-root")?.getAttribute("data-slug") || ""
+      : "";
     const text = onMap ? (sameMap(viewed, slug) ? here : "") : jump;
     if (!text) {
       node.hidden = true;
@@ -65,7 +62,12 @@ export function paintGoonBars(nameOf: (slug: string) => string) {
 
 async function refresh() {
   try {
-    const data = await invoke<{ map_slug?: string; mapSlug?: string; seen_at?: string; seenAt?: string }>("site_get", { path: "/guides/tarkov/goons" });
+    const data = await invoke<{
+      map_slug?: string;
+      mapSlug?: string;
+      seen_at?: string;
+      seenAt?: string;
+    }>("site_get", { path: "/guides/tarkov/goons" });
     const mapSlug = String(data.map_slug || data.mapSlug || "").trim();
     goon = mapSlug ? { mapSlug, seenAt: String(data.seen_at || data.seenAt || "") } : null;
   } catch {

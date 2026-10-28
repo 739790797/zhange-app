@@ -1,3 +1,4 @@
+import { invoke } from "./tauriBridge";
 import { fadeIn, fadeOut } from "./motion";
 import { pushNav, replaceNav } from "./navHistory";
 import { spin } from "./spinner";
@@ -88,13 +89,41 @@ type CommunityBuild = {
   ammoId: string;
 };
 type PartSortKey = "name" | "ergonomics" | "recoil" | "weight" | "price";
-type CommunitySortKey = "published" | "loads" | "ergo" | "evo" | "recoilV" | "recoilH" | "overswing" | "price";
+type CommunitySortKey =
+  | "published"
+  | "loads"
+  | "ergo"
+  | "evo"
+  | "recoilV"
+  | "recoilH"
+  | "overswing"
+  | "price";
 type SortDir = "asc" | "desc";
 type SlotFamily =
-  | "muzzle" | "barrel" | "gas" | "handguard" | "catch" | "receiver" | "stock"
-  | "charge" | "front_sight" | "rear_sight" | "scope" | "mount" | "magazine"
-  | "pistol_grip" | "foregrip" | "bipod" | "tactical" | "ubgl" | "grip"
-  | "shroud" | "trigger" | "chamber" | "hammer" | "unknown";
+  | "muzzle"
+  | "barrel"
+  | "gas"
+  | "handguard"
+  | "catch"
+  | "receiver"
+  | "stock"
+  | "charge"
+  | "front_sight"
+  | "rear_sight"
+  | "scope"
+  | "mount"
+  | "magazine"
+  | "pistol_grip"
+  | "foregrip"
+  | "bipod"
+  | "tactical"
+  | "ubgl"
+  | "grip"
+  | "shroud"
+  | "trigger"
+  | "chamber"
+  | "hammer"
+  | "unknown";
 type GridSlot = {
   slotId: string;
   family: SlotFamily;
@@ -136,8 +165,25 @@ const CONSTRAINT_LABEL: Record<string, string> = {
   min_width: "格仓宽",
   min_height: "格仓高",
 };
-const CONSTRAINT_ORDER = ["min_durability", "min_ergonomics", "max_recoil_sum", "max_weight", "min_mag_capacity", "max_mag_capacity", "min_sighting_range", "max_width", "max_height"];
-const LIVE_CONSTRAINTS = new Set(["min_ergonomics", "max_recoil_sum", "max_weight", "min_mag_capacity", "max_mag_capacity", "min_sighting_range"]);
+const CONSTRAINT_ORDER = [
+  "min_durability",
+  "min_ergonomics",
+  "max_recoil_sum",
+  "max_weight",
+  "min_mag_capacity",
+  "max_mag_capacity",
+  "min_sighting_range",
+  "max_width",
+  "max_height",
+];
+const LIVE_CONSTRAINTS = new Set([
+  "min_ergonomics",
+  "max_recoil_sum",
+  "max_weight",
+  "min_mag_capacity",
+  "max_mag_capacity",
+  "min_sighting_range",
+]);
 const WEAPON_CLASS: Record<string, string> = {
   "assault-rifle": "突击步枪",
   handgun: "手枪",
@@ -189,13 +235,22 @@ const CALIBER_LABEL: Record<string, string> = {
   "30x29": "30x29mm",
   "725": "72.5mm",
 };
-const EED_HINT = "与纸面人机不同，Evo人机工效将装备重量一并纳入计算。两把Evo人机相同的枪操纵性理论上完全一致（过摆行为与开镜速度均相同，除去技能等级等变量影响）。人物重量会影响开镜速度，但不影响过摆。请设置装备人机工效修正以获得准确结果。";
+const EED_HINT =
+  "与纸面人机不同，Evo人机工效将装备重量一并纳入计算。两把Evo人机相同的枪操纵性理论上完全一致（过摆行为与开镜速度均相同，除去技能等级等变量影响）。人物重量会影响开镜速度，但不影响过摆。请设置装备人机工效修正以获得准确结果。";
 const OVERSWING_HINT = "表示开镜后准星是否会摆过中心点。当EED为负时发生。预计偏差 ±2 EED。";
 const STRENGTH_HINT = "影响站立时手臂耐力耗尽所需秒数，预计偏差 ±0.5s";
-const EQUIP_HINT = "所佩戴装备（头盔、防弹衣、背包、战术背心、面罩、护目镜）的人机工效惩罚总和。请根据游戏中的实际装备进行设置。";
+const EQUIP_HINT =
+  "所佩戴装备（头盔、防弹衣、背包、战术背心、面罩、护目镜）的人机工效惩罚总和。请根据游戏中的实际装备进行设置。";
 const LEFT_ORDER: SlotFamily[] = ["receiver", "handguard", "catch", "barrel", "gas", "muzzle"];
-const TOP_COL: Partial<Record<SlotFamily, number>> = { scope: GUN_COL + 1, mount: GUN_COL + 1, rear_sight: GUN_COL + 2 };
-const BOTTOM_COL: Partial<Record<SlotFamily, number>> = { magazine: GUN_COL + 1, pistol_grip: GUN_COL + 2 };
+const TOP_COL: Partial<Record<SlotFamily, number>> = {
+  scope: GUN_COL + 1,
+  mount: GUN_COL + 1,
+  rear_sight: GUN_COL + 2,
+};
+const BOTTOM_COL: Partial<Record<SlotFamily, number>> = {
+  magazine: GUN_COL + 1,
+  pistol_grip: GUN_COL + 2,
+};
 const BOTTOM_LEFT = new Set<SlotFamily>(["bipod", "foregrip", "ubgl"]);
 const EXTRAS = new Set<SlotFamily>(["grip", "shroud", "trigger", "chamber", "hammer"]);
 
@@ -253,7 +308,10 @@ let equipPenalty = loadEquip();
 let keyBound = false;
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function rec(value: unknown): Record<string, unknown> | null {
@@ -287,10 +345,13 @@ function gameMode() {
 function factionChoice() {
   try {
     const parsed = JSON.parse(localStorage.getItem(FACTION_KEY) || "null") as unknown;
-    const raw = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)[gameMode()]
-      : parsed;
-    const name = String(raw || "").trim().toLowerCase();
+    const raw =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)[gameMode()]
+        : parsed;
+    const name = String(raw || "")
+      .trim()
+      .toLowerCase();
     return name === "bear" || name === "usec" ? name : "";
   } catch {
     return "";
@@ -307,7 +368,12 @@ function factionOk(name: string) {
 
 function loadStrength() {
   try {
-    return clampInt(localStorage.getItem(STRENGTH_KEY), STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT);
+    return clampInt(
+      localStorage.getItem(STRENGTH_KEY),
+      STRENGTH_MIN,
+      STRENGTH_MAX,
+      STRENGTH_DEFAULT,
+    );
   } catch {
     return STRENGTH_DEFAULT;
   }
@@ -323,22 +389,26 @@ function loadEquip() {
 
 function saveStrength(value: number) {
   strength = clampInt(value, STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT);
-  try { localStorage.setItem(STRENGTH_KEY, String(strength)); } catch { /* 配额不足时只留在当前页 */ }
+  try {
+    localStorage.setItem(STRENGTH_KEY, String(strength));
+  } catch {
+    /* 配额不足时只留在当前页 */
+  }
 }
 
 function saveEquip(value: number) {
   equipPenalty = clampInt(value, EQUIP_MIN, EQUIP_MAX, 0);
-  try { localStorage.setItem(EQUIP_KEY, String(equipPenalty)); } catch { /* 配额不足时只留在当前页 */ }
-}
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
+  try {
+    localStorage.setItem(EQUIP_KEY, String(equipPenalty));
+  } catch {
+    /* 配额不足时只留在当前页 */
+  }
 }
 
 function iconOf(icon: string, id: string) {
-  const url = icon.trim().replace(/-(?:icon|grid-image|base-image|512|8x|image)\.webp(\?.*)?$/i, "-icon.webp$1");
+  const url = icon
+    .trim()
+    .replace(/-(?:icon|grid-image|base-image|512|8x|image)\.webp(\?.*)?$/i, "-icon.webp$1");
   if (url) return url;
   return /^[a-f0-9]{24}$/i.test(id) ? `https://assets.tarkov.dev/${id}-icon.webp` : "";
 }
@@ -352,7 +422,10 @@ function hdOf(src: string) {
 function caliberLabel(value: string) {
   const raw = value.trim();
   if (!raw) return "—";
-  const key = raw.toLowerCase().replace(/\s+/g, "").replace(/^caliber/, "");
+  const key = raw
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/^caliber/, "");
   return CALIBER_LABEL[key] || (/^caliber/i.test(raw) ? key || raw : raw);
 }
 
@@ -425,7 +498,13 @@ function overswingOf(ergo: number, weight: number) {
 function armSeconds(weight: number, ergo: number) {
   const safeWeight = weight > 0 ? weight : 0;
   const bonus = 1 + equipModifier() / 2;
-  return Math.round(((85.5 / (safeWeight + 0.65) + 9.15 + 0.06477 * ergo * bonus) / 1.04) * (1 + strength * 0.004) * 10) / 10;
+  return (
+    Math.round(
+      ((85.5 / (safeWeight + 0.65) + 9.15 + 0.06477 * ergo * bonus) / 1.04) *
+        (1 + strength * 0.004) *
+        10,
+    ) / 10
+  );
 }
 
 function readPart(value: unknown): Part | null {
@@ -442,7 +521,8 @@ function readPart(value: unknown): Part | null {
     ergo: num(row.ergonomics) || 0,
     recoil: num(row.recoil_modifier ?? row.recoilModifier) || 0,
     weight: num(row.weight) || 0,
-    price: row.price_rub == null && row.priceRub == null ? null : num(row.price_rub ?? row.priceRub),
+    price:
+      row.price_rub == null && row.priceRub == null ? null : num(row.price_rub ?? row.priceRub),
     conflicts: strings(row.conflicting_ids || row.conflictingIds),
     categories: strings(row.category_ids || row.categoryIds),
   };
@@ -454,14 +534,16 @@ function readSlots(value: unknown): SlotNode[] {
     if (!row) return [];
     const id = str(row.id);
     if (!id) return [];
-    return [{
-      id,
-      name: str(row.name || row.label) || "槽位",
-      nameId: str(row.name_id || row.nameId),
-      required: row.required === true || row.mandatory === true,
-      installed: readPart(row.installed),
-      children: readSlots(row.children),
-    }];
+    return [
+      {
+        id,
+        name: str(row.name || row.label) || "槽位",
+        nameId: str(row.name_id || row.nameId),
+        required: row.required === true || row.mandatory === true,
+        installed: readPart(row.installed),
+        children: readSlots(row.children),
+      },
+    ];
   });
 }
 
@@ -515,7 +597,11 @@ function readSmith(row: Record<string, unknown>): SmithTask | null {
       if (parsed != null) constraints[key] = parsed;
     }
   }
-  const groups = Array.isArray(row.required_category_groups) ? row.required_category_groups : Array.isArray(row.requiredCategoryGroups) ? row.requiredCategoryGroups : [];
+  const groups = Array.isArray(row.required_category_groups)
+    ? row.required_category_groups
+    : Array.isArray(row.requiredCategoryGroups)
+      ? row.requiredCategoryGroups
+      : [];
   return {
     id,
     taskId: task,
@@ -637,7 +723,8 @@ function slotFamily(nameId: string): SlotFamily {
   if (id.includes("pistol_grip") || id.includes("pistolgrip")) return "pistol_grip";
   if (id.includes("foregrip")) return "foregrip";
   if (id.includes("bipod")) return "bipod";
-  if (id.includes("tactical") || id.includes("flashlight") || id.includes("laser")) return "tactical";
+  if (id.includes("tactical") || id.includes("flashlight") || id.includes("laser"))
+    return "tactical";
   if (id.includes("launcher") || id.includes("ubgl")) return "ubgl";
   if (id.includes("stock") || id.includes("buffer")) return "stock";
   if (id === "receiver" || id.includes("reciever") || id.includes("receiver")) return "receiver";
@@ -649,7 +736,12 @@ function slotFamily(nameId: string): SlotFamily {
   return "unknown";
 }
 
-function collectGrid(nodes: SlotNode[], parentSlotId: string | null = null, parentFamily: SlotFamily | null = null, depth = 0): GridSlot[] {
+function collectGrid(
+  nodes: SlotNode[],
+  parentSlotId: string | null = null,
+  parentFamily: SlotFamily | null = null,
+  depth = 0,
+): GridSlot[] {
   const out: GridSlot[] = [];
   for (const node of nodes) {
     const family = slotFamily(node.nameId);
@@ -711,10 +803,13 @@ function layoutGrid(items: GridSlot[]) {
   const present = new Set(items.map((row) => row.family));
   const leftQueue = LEFT_ORDER.filter((name) => present.has(name));
   const leftCol: Partial<Record<SlotFamily, number>> = {};
-  leftQueue.forEach((name, index) => { leftCol[name] = GUN_COL - 1 - index; });
+  leftQueue.forEach((name, index) => {
+    leftCol[name] = GUN_COL - 1 - index;
+  });
   let muzzleCol = leftCol.muzzle;
   if (muzzleCol == null) {
-    if (leftQueue.length) muzzleCol = Math.max(1, (leftCol[leftQueue[leftQueue.length - 1]] || GUN_COL - 1) - 1);
+    if (leftQueue.length)
+      muzzleCol = Math.max(1, (leftCol[leftQueue[leftQueue.length - 1]] || GUN_COL - 1) - 1);
     else muzzleCol = GUN_COL - 1;
   }
   let tacticalCount = 0;
@@ -764,7 +859,7 @@ function layoutGrid(items: GridSlot[]) {
     virtual.push(placed);
     if (placed && !slot.empty) installPos.set(slot.slotId, placed);
   }
-  const vrows = virtual.flatMap((row) => row ? [row.vrow] : []);
+  const vrows = virtual.flatMap((row) => (row ? [row.vrow] : []));
   const minVrow = vrows.length ? Math.min(...vrows, 0) : 0;
   const maxVrow = vrows.length ? Math.max(...vrows, 0) : 0;
   const cells: LaidCell[] = items.map((slot, index) => {
@@ -813,9 +908,12 @@ function liveCheck(task: SmithTask) {
   if (rules.min_ergonomics != null && ergo < rules.min_ergonomics) unmet.push("min_ergonomics");
   if (rules.max_recoil_sum != null && recoil > rules.max_recoil_sum) unmet.push("max_recoil_sum");
   if (rules.max_weight != null && weight > rules.max_weight) unmet.push("max_weight");
-  if (rules.min_mag_capacity != null && mag < rules.min_mag_capacity) unmet.push("min_mag_capacity");
-  if (rules.max_mag_capacity != null && (mag <= 0 || mag > rules.max_mag_capacity)) unmet.push("max_mag_capacity");
-  if (rules.min_sighting_range != null && sight < rules.min_sighting_range) unmet.push("min_sighting_range");
+  if (rules.min_mag_capacity != null && mag < rules.min_mag_capacity)
+    unmet.push("min_mag_capacity");
+  if (rules.max_mag_capacity != null && (mag <= 0 || mag > rules.max_mag_capacity))
+    unmet.push("max_mag_capacity");
+  if (rules.min_sighting_range != null && sight < rules.min_sighting_range)
+    unmet.push("min_sighting_range");
   return { missingItems, missingGroups, unmet };
 }
 
@@ -880,7 +978,10 @@ function paint() {
   if (!host) return;
   const wasOpen = modalLive;
   const active = document.activeElement;
-  const keep = active instanceof HTMLInputElement && active.type === "text" && host.contains(active) ? active.id : "";
+  const keep =
+    active instanceof HTMLInputElement && active.type === "text" && host.contains(active)
+      ? active.id
+      : "";
   const pos = keep && active instanceof HTMLInputElement ? active.selectionStart : null;
   host.innerHTML = render();
   const modal = host.querySelector<HTMLElement>(".wb-modal");
@@ -904,31 +1005,43 @@ function sortMark(active: boolean, dir: SortDir) {
 
 function listedGuns() {
   const needle = gunQuery.trim().toLowerCase();
-  return guns.filter((item) => {
-    if (caliberFilter && item.caliber !== caliberFilter) return false;
-    if (classFilter && item.weaponClass !== classFilter) return false;
-    if (!needle) return true;
-    return `${item.name} ${item.short}`.toLowerCase().includes(needle);
-  }).sort((a, b) => {
-    const byCaliber = caliberLabel(a.caliber).localeCompare(caliberLabel(b.caliber), "zh");
-    if (byCaliber) return byCaliber;
-    return (a.name || a.short).localeCompare(b.name || b.short, "zh");
-  });
+  return guns
+    .filter((item) => {
+      if (caliberFilter && item.caliber !== caliberFilter) return false;
+      if (classFilter && item.weaponClass !== classFilter) return false;
+      if (!needle) return true;
+      return `${item.name} ${item.short}`.toLowerCase().includes(needle);
+    })
+    .sort((a, b) => {
+      const byCaliber = caliberLabel(a.caliber).localeCompare(caliberLabel(b.caliber), "zh");
+      if (byCaliber) return byCaliber;
+      return (a.name || a.short).localeCompare(b.name || b.short, "zh");
+    });
 }
 
 function gunPicker() {
   if (!pickOpen) return "";
-  const calibers = [...new Set(guns.map((item) => item.caliber).filter(Boolean))].sort((a, b) => caliberLabel(a).localeCompare(caliberLabel(b), "zh"));
-  const classes = [...new Set(guns.map((item) => item.weaponClass))].sort((a, b) => classLabel(a).localeCompare(classLabel(b), "zh"));
+  const calibers = [...new Set(guns.map((item) => item.caliber).filter(Boolean))].sort((a, b) =>
+    caliberLabel(a).localeCompare(caliberLabel(b), "zh"),
+  );
+  const classes = [...new Set(guns.map((item) => item.weaponClass))].sort((a, b) =>
+    classLabel(a).localeCompare(classLabel(b), "zh"),
+  );
   const rows = listedGuns();
   const body = gunsLoading
     ? spin("正在读取枪械")
     : gunsError
       ? `<p class="wb-hint">${esc(gunsError)}</p>`
-      : `<div class="wb-filters"><select id="wb-gun-caliber" aria-label="口径"><option value="">全部口径</option>${calibers.map((item) => `<option value="${esc(item)}"${item === caliberFilter ? " selected" : ""}>${esc(caliberLabel(item))}</option>`).join("")}</select><select id="wb-gun-class" aria-label="类型"><option value="">全部类型</option>${classes.map((item) => `<option value="${esc(item)}"${item === classFilter ? " selected" : ""}>${esc(classLabel(item))}</option>`).join("")}</select><input id="wb-gun-q" type="text" value="${esc(gunQuery)}" placeholder="关键词搜索" aria-label="搜索枪械" /></div><p class="wb-hint">共 ${rows.length} 把</p>${rows.length ? `<table class="wb-table wb-gun-table"><thead><tr><th>口径</th><th>图片</th><th>名称</th><th>类型</th></tr></thead><tbody>${rows.map((item) => {
-        const icon = iconOf(item.icon, item.id);
-        return `<tr data-wb-gun="${esc(item.id)}"><td>${esc(caliberLabel(item.caliber))}</td><td>${icon ? `<img src="${esc(icon)}" alt="" />` : "—"}</td><td><button type="button" data-wb-gun="${esc(item.id)}" title="进入改枪">${esc(item.name || item.short)}</button></td><td>${esc(classLabel(item.weaponClass))}</td></tr>`;
-      }).join("")}</tbody></table>` : `<p class="wb-hint">没有匹配的枪</p>`}`;
+      : `<div class="wb-filters"><select id="wb-gun-caliber" aria-label="口径"><option value="">全部口径</option>${calibers.map((item) => `<option value="${esc(item)}"${item === caliberFilter ? " selected" : ""}>${esc(caliberLabel(item))}</option>`).join("")}</select><select id="wb-gun-class" aria-label="类型"><option value="">全部类型</option>${classes.map((item) => `<option value="${esc(item)}"${item === classFilter ? " selected" : ""}>${esc(classLabel(item))}</option>`).join("")}</select><input id="wb-gun-q" type="text" value="${esc(gunQuery)}" placeholder="关键词搜索" aria-label="搜索枪械" /></div><p class="wb-hint">共 ${rows.length} 把</p>${
+          rows.length
+            ? `<table class="wb-table wb-gun-table"><thead><tr><th>口径</th><th>图片</th><th>名称</th><th>类型</th></tr></thead><tbody>${rows
+                .map((item) => {
+                  const icon = iconOf(item.icon, item.id);
+                  return `<tr data-wb-gun="${esc(item.id)}"><td>${esc(caliberLabel(item.caliber))}</td><td>${icon ? `<img src="${esc(icon)}" alt="" />` : "—"}</td><td><button type="button" data-wb-gun="${esc(item.id)}" title="进入改枪">${esc(item.name || item.short)}</button></td><td>${esc(classLabel(item.weaponClass))}</td></tr>`;
+                })
+                .join("")}</tbody></table>`
+            : `<p class="wb-hint">没有匹配的枪</p>`
+        }`;
   return modal("选枪", body, true);
 }
 
@@ -937,7 +1050,9 @@ function listedSmith() {
   return smithTasks.filter((task) => {
     if (!factionOk(task.faction)) return false;
     if (!needle) return true;
-    return `${task.taskName} ${task.weaponName} ${task.trader} ${task.taskId}`.toLowerCase().includes(needle);
+    return `${task.taskName} ${task.weaponName} ${task.trader} ${task.taskId}`
+      .toLowerCase()
+      .includes(needle);
   });
 }
 
@@ -948,12 +1063,18 @@ function smithPicker() {
     ? spin("正在读取枪匠任务")
     : smithError
       ? `<p class="wb-hint">${esc(smithError)}</p>`
-      : `<input id="wb-smith-q" class="wb-search" type="text" value="${esc(smithQuery)}" placeholder="搜索任务 / 枪名" aria-label="搜索枪匠任务" />${rows.length ? `<div class="wb-smith-list">${rows.map((task) => {
-        const meta = [task.trader, task.weaponName].filter(Boolean).join(" · ");
-        const extra = task.loadable ? "" : " · 图鉴没有这把枪";
-        const icon = iconOf(task.weaponImage, task.weaponId);
-        return `<button type="button" class="wb-smith-row" data-wb-task="${esc(task.id)}" ${task.loadable ? "" : "disabled"}>${icon ? `<img src="${esc(icon)}" alt="" />` : `<span class="wb-smith-thumb"></span>`}<span><strong>${esc(task.taskName)}</strong><em>${esc(meta)}${esc(extra)}</em></span></button>`;
-      }).join("")}</div>` : `<p class="wb-hint">没有枪匠改装任务</p>`}`;
+      : `<input id="wb-smith-q" class="wb-search" type="text" value="${esc(smithQuery)}" placeholder="搜索任务 / 枪名" aria-label="搜索枪匠任务" />${
+          rows.length
+            ? `<div class="wb-smith-list">${rows
+                .map((task) => {
+                  const meta = [task.trader, task.weaponName].filter(Boolean).join(" · ");
+                  const extra = task.loadable ? "" : " · 图鉴没有这把枪";
+                  const icon = iconOf(task.weaponImage, task.weaponId);
+                  return `<button type="button" class="wb-smith-row" data-wb-task="${esc(task.id)}" ${task.loadable ? "" : "disabled"}>${icon ? `<img src="${esc(icon)}" alt="" />` : `<span class="wb-smith-thumb"></span>`}<span><strong>${esc(task.taskName)}</strong><em>${esc(meta)}${esc(extra)}</em></span></button>`;
+                })
+                .join("")}</div>`
+            : `<p class="wb-hint">没有枪匠改装任务</p>`
+        }`;
   return modal("枪匠任务", body);
 }
 
@@ -968,10 +1089,12 @@ function communityRows() {
 }
 
 function compareBuild(a: CommunityBuild, b: CommunityBuild, key: CommunitySortKey) {
-  const value = (item: number | null) => item == null || !Number.isFinite(item) ? Number.NEGATIVE_INFINITY : item;
+  const value = (item: number | null) =>
+    item == null || !Number.isFinite(item) ? Number.NEGATIVE_INFINITY : item;
   if (key === "published") return a.published.localeCompare(b.published);
   if (key === "loads") return a.loads - b.loads;
-  if (key === "overswing") return Number(a.hasPreview && a.overswing) - Number(b.hasPreview && b.overswing);
+  if (key === "overswing")
+    return Number(a.hasPreview && a.overswing) - Number(b.hasPreview && b.overswing);
   if (key === "ergo") return value(a.ergo) - value(b.ergo);
   if (key === "evo") return value(a.evo) - value(b.evo);
   if (key === "recoilV") return value(a.recoilV) - value(b.recoilV);
@@ -995,18 +1118,38 @@ function communityPicker() {
   const pages = Math.max(1, Math.ceil(rows.length / pageSize) || 1);
   if (page > pages) page = pages;
   const slice = rows.slice((page - 1) * pageSize, page * pageSize);
-  const table = slice.length ? `<table class="wb-table"><thead><tr><th>方案名称</th>${communityHead("更新日期", "published")}${communityHead("加载次数", "loads")}${communityHead("人工机效", "ergo")}${communityHead("EVO人机DELTA", "evo")}${communityHead("垂直后坐力", "recoilV")}${communityHead("水平后坐力", "recoilH")}${communityHead("过摆", "overswing")}${communityHead("费用", "price")}<th>操作</th></tr></thead><tbody>${slice.map((build) => {
-    const evo = formatEvo(build.evo);
-    const swing = build.hasPreview ? (build.overswing ? "是" : "否") : "—";
-    return `<tr><td class="wb-build-name">${build.featured ? `<span class="wb-featured">精选</span>` : ""}<strong>${esc(build.name)}</strong><em>${esc(build.author)}</em>${build.dropped ? `<span>省略 ${build.dropped} 件本站没有的配件</span>` : ""}</td><td>${esc(dayText(build.published) || "—")}</td><td>${build.loads}</td><td>${esc(build.ergo == null ? "—" : String(Math.round(build.ergo * 10) / 10))}</td><td class="${build.evo == null ? "" : build.evo >= 0 ? "wb-good" : "wb-bad"}">${esc(evo)}</td><td>${build.recoilV ?? "—"}</td><td>${build.recoilH ?? "—"}</td><td class="${!build.hasPreview ? "" : build.overswing ? "wb-bad" : "wb-good"}">${swing}</td><td>${esc(formatMoney(build.price))}</td><td><button type="button" data-wb-build="${esc(build.id)}" ${build.loadable ? "" : "disabled"} title="${build.loadable ? "加载" : "这套方案与当前图鉴对不上，无法装入"}">加载</button></td></tr>`;
-  }).join("")}</tbody></table><div class="wb-pager"><button type="button" data-wb-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button type="button" data-wb-page="next" ${page >= pages ? "disabled" : ""}>下一页</button><select id="wb-page-size" aria-label="每页条数">${[20, 50, 100].map((size) => `<option value="${size}"${size === pageSize ? " selected" : ""}>${size} / 页</option>`).join("")}</select></div>` : `<p class="wb-hint">${community.length ? "没有匹配的方案" : "这把枪还没有公开方案。"}</p>`;
-  const body = communityLoading ? spin("正在读取社区方案") : communityError ? `<p class="wb-hint">${esc(communityError)}</p>` : table;
-  return modal("社区方案", body, true, `<footer class="wb-dialog-foot">列表来自 EFTForge 社区公开方案，按本站图鉴装入。不代为点赞或评论。</footer>`);
+  const table = slice.length
+    ? `<table class="wb-table"><thead><tr><th>方案名称</th>${communityHead("更新日期", "published")}${communityHead("加载次数", "loads")}${communityHead("人工机效", "ergo")}${communityHead("EVO人机DELTA", "evo")}${communityHead("垂直后坐力", "recoilV")}${communityHead("水平后坐力", "recoilH")}${communityHead("过摆", "overswing")}${communityHead("费用", "price")}<th>操作</th></tr></thead><tbody>${slice
+        .map((build) => {
+          const evo = formatEvo(build.evo);
+          const swing = build.hasPreview ? (build.overswing ? "是" : "否") : "—";
+          return `<tr><td class="wb-build-name">${build.featured ? `<span class="wb-featured">精选</span>` : ""}<strong>${esc(build.name)}</strong><em>${esc(build.author)}</em>${build.dropped ? `<span>省略 ${build.dropped} 件本站没有的配件</span>` : ""}</td><td>${esc(dayText(build.published) || "—")}</td><td>${build.loads}</td><td>${esc(build.ergo == null ? "—" : String(Math.round(build.ergo * 10) / 10))}</td><td class="${build.evo == null ? "" : build.evo >= 0 ? "wb-good" : "wb-bad"}">${esc(evo)}</td><td>${build.recoilV ?? "—"}</td><td>${build.recoilH ?? "—"}</td><td class="${!build.hasPreview ? "" : build.overswing ? "wb-bad" : "wb-good"}">${swing}</td><td>${esc(formatMoney(build.price))}</td><td><button type="button" data-wb-build="${esc(build.id)}" ${build.loadable ? "" : "disabled"} title="${build.loadable ? "加载" : "这套方案与当前图鉴对不上，无法装入"}">加载</button></td></tr>`;
+        })
+        .join(
+          "",
+        )}</tbody></table><div class="wb-pager"><button type="button" data-wb-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button type="button" data-wb-page="next" ${page >= pages ? "disabled" : ""}>下一页</button><select id="wb-page-size" aria-label="每页条数">${[20, 50, 100].map((size) => `<option value="${size}"${size === pageSize ? " selected" : ""}>${size} / 页</option>`).join("")}</select></div>`
+    : `<p class="wb-hint">${community.length ? "没有匹配的方案" : "这把枪还没有公开方案。"}</p>`;
+  const body = communityLoading
+    ? spin("正在读取社区方案")
+    : communityError
+      ? `<p class="wb-hint">${esc(communityError)}</p>`
+      : table;
+  return modal(
+    "社区方案",
+    body,
+    true,
+    `<footer class="wb-dialog-foot">列表来自 EFTForge 社区公开方案，按本站图鉴装入。不代为点赞或评论。</footer>`,
+  );
 }
 
 function filteredParts(parts: Part[]) {
   const needle = partQuery.trim().toLowerCase();
-  const rows = needle ? parts.filter((part) => part.name.toLowerCase().includes(needle) || part.short.toLowerCase().includes(needle)) : parts;
+  const rows = needle
+    ? parts.filter(
+        (part) =>
+          part.name.toLowerCase().includes(needle) || part.short.toLowerCase().includes(needle),
+      )
+    : parts;
   const sign = partSort.dir === "asc" ? 1 : -1;
   return [...rows].sort((a, b) => {
     const cmp = comparePart(a, b) * sign;
@@ -1017,7 +1160,14 @@ function filteredParts(parts: Part[]) {
 
 function comparePart(a: Part, b: Part) {
   if (partSort.key === "name") return a.name.localeCompare(b.name, "zh");
-  const value = (part: Part) => partSort.key === "ergonomics" ? part.ergo : partSort.key === "recoil" ? part.recoil : partSort.key === "weight" ? part.weight : (part.price || 0);
+  const value = (part: Part) =>
+    partSort.key === "ergonomics"
+      ? part.ergo
+      : partSort.key === "recoil"
+        ? part.recoil
+        : partSort.key === "weight"
+          ? part.weight
+          : part.price || 0;
   return value(a) - value(b);
 }
 
@@ -1034,20 +1184,42 @@ function partPicker() {
   const loading = allowedLoading && !parts.length;
   const installedIds = pairs.map((pair) => pair.item_id);
   const installedParts = collectInstalled(slots);
-  const rows = loading ? "" : filteredParts(parts).map((part) => {
-    const current = slot.installed?.id === part.id;
-    const conflict = partConflicts(part, installedIds, slot.installed?.id || "", installedParts);
-    const icon = part.icon ? `<img src="${esc(part.icon)}" alt="" />` : `<span class="wb-part-empty"></span>`;
-    return `<button type="button" class="wb-part${current ? " on" : ""}${conflict ? " bad" : ""}" data-wb-install="${esc(part.id)}" title="${conflict ? "与已装配件冲突" : esc(part.name)}">${icon}<span>${esc(part.name)}</span><span>${esc(formatSigned(part.ergo))}</span><span>${esc(formatPercent(part.recoil))}</span><span>${esc(formatWeight(part.weight))}</span><span>${esc(formatMoney(part.price))}</span></button>`;
-  }).join("");
-  const foot = slot.installed && !slot.required ? `<footer class="wb-dialog-foot"><button type="button" data-wb-unload>卸下</button></footer>` : "";
+  const rows = loading
+    ? ""
+    : filteredParts(parts)
+        .map((part) => {
+          const current = slot.installed?.id === part.id;
+          const conflict = partConflicts(
+            part,
+            installedIds,
+            slot.installed?.id || "",
+            installedParts,
+          );
+          const icon = part.icon
+            ? `<img src="${esc(part.icon)}" alt="" />`
+            : `<span class="wb-part-empty"></span>`;
+          return `<button type="button" class="wb-part${current ? " on" : ""}${conflict ? " bad" : ""}" data-wb-install="${esc(part.id)}" title="${conflict ? "与已装配件冲突" : esc(part.name)}">${icon}<span>${esc(part.name)}</span><span>${esc(formatSigned(part.ergo))}</span><span>${esc(formatPercent(part.recoil))}</span><span>${esc(formatWeight(part.weight))}</span><span>${esc(formatMoney(part.price))}</span></button>`;
+        })
+        .join("");
+  const foot =
+    slot.installed && !slot.required
+      ? `<footer class="wb-dialog-foot"><button type="button" data-wb-unload>卸下</button></footer>`
+      : "";
   const body = `<input id="wb-part-q" class="wb-search" type="text" value="${esc(partQuery)}" placeholder="搜索配件" aria-label="搜索配件" />${loading ? spin("正在读取配件", true) : `<div class="wb-part-head"><span></span>${partHead("配件", "name")}${partHead("人机", "ergonomics")}${partHead("后坐", "recoil")}${partHead("重量", "weight")}${partHead("估价", "price")}</div><div class="wb-parts">${rows || `<p class="wb-hint">没有匹配配件</p>`}</div>`}`;
   return modal(title, body, false, foot);
 }
 
 function cellButton(cell: LaidCell, style: string) {
   const conflict = new Set(stats?.conflicts || []);
-  const cls = ["wb-cell", cell.slotId === activeSlot ? "on" : "", cell.empty ? "empty" : "", cell.empty && cell.required ? "need" : "", cell.itemId && conflict.has(cell.itemId) ? "bad" : ""].filter(Boolean).join(" ");
+  const cls = [
+    "wb-cell",
+    cell.slotId === activeSlot ? "on" : "",
+    cell.empty ? "empty" : "",
+    cell.empty && cell.required ? "need" : "",
+    cell.itemId && conflict.has(cell.itemId) ? "bad" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const src = cell.empty ? "" : iconOf(cell.icon, cell.itemId);
   const inner = src ? `<img src="${esc(src)}" alt="" />` : `<span class="wb-plus">+</span>`;
   const short = cell.shortName ? `<span class="wb-short">${esc(cell.shortName)}</span>` : "";
@@ -1063,9 +1235,15 @@ function board() {
   if (!art && !layout.cells.length) return `<p class="wb-hint">没有枪图</p>`;
   const placed = layout.cells.filter((cell) => !cell.extras);
   const extras = layout.cells.filter((cell) => cell.extras);
-  const cells = placed.map((cell) => cellButton(cell, `style="grid-column:${cell.col};grid-row:${cell.row}"`)).join("");
-  const extra = extras.length ? `<div class="wb-extras">${extras.map((cell) => cellButton(cell, "")).join("")}</div>` : "";
-  const image = art ? `<img src="${esc(art)}" alt="${esc(gun.short || gun.name)}" />` : `<span class="wb-plus">+</span>`;
+  const cells = placed
+    .map((cell) => cellButton(cell, `style="grid-column:${cell.col};grid-row:${cell.row}"`))
+    .join("");
+  const extra = extras.length
+    ? `<div class="wb-extras">${extras.map((cell) => cellButton(cell, "")).join("")}</div>`
+    : "";
+  const image = art
+    ? `<img src="${esc(art)}" alt="${esc(gun.short || gun.name)}" />`
+    : `<span class="wb-plus">+</span>`;
   return `<div class="wb-board" aria-label="配件示意图"><div class="wb-board-wrap"><div class="wb-grid" style="grid-template-rows:repeat(${layout.totalRows}, var(--wb-cell-h))"><div class="wb-gun" style="grid-column:${GUN_COL} / ${GUN_COL + GUN_SPAN};grid-row:${layout.gunRow}">${image}<span class="wb-label">${esc(gun.short || gun.name)}</span></div>${cells}</div>${extra}</div></div>`;
 }
 
@@ -1075,23 +1253,38 @@ function smithPanel() {
     const check = liveCheck(spec);
     const missed = new Set(check.unmet);
     const missingItems = new Set(check.missingItems.map((item) => item.id));
-    const missingGroups = new Set(check.missingGroups.map((group) => group.map((item) => item.id).join("\0")));
+    const missingGroups = new Set(
+      check.missingGroups.map((group) => group.map((item) => item.id).join("\0")),
+    );
     const lines = orderedConstraints(spec).map(([key, value]) => {
       const live = LIVE_CONSTRAINTS.has(key);
       const fail = live && missed.has(key);
-      const hint = key === "min_durability" ? "（上交时）" : key === "max_width" || key === "max_height" ? "（工作台暂不按折叠对照）" : "";
+      const hint =
+        key === "min_durability"
+          ? "（上交时）"
+          : key === "max_width" || key === "max_height"
+            ? "（工作台暂不按折叠对照）"
+            : "";
       const mark = live ? (fail ? "×" : "✓") : "·";
       return `<li class="${fail ? "bad" : live ? "ok" : "note"}">${mark} ${esc(constraintText(key, value))}${hint}</li>`;
     });
     for (const item of spec.requiredItems) {
       const fail = Boolean(item.id) && missingItems.has(item.id);
-      lines.push(`<li class="${fail ? "bad" : "ok"}">${fail ? "×" : "✓"} 必装 ${esc(item.name || item.id)}</li>`);
+      lines.push(
+        `<li class="${fail ? "bad" : "ok"}">${fail ? "×" : "✓"} 必装 ${esc(item.name || item.id)}</li>`,
+      );
     }
     for (const group of spec.categoryGroups) {
       const key = group.map((item) => item.id).join("\0");
       const fail = missingGroups.has(key);
-      const label = group.map((item) => item.name || item.id).filter(Boolean).join(" / ");
-      if (label) lines.push(`<li class="${fail ? "bad" : "ok"}">${fail ? "×" : "✓"} 配件分类：${esc(label)}</li>`);
+      const label = group
+        .map((item) => item.name || item.id)
+        .filter(Boolean)
+        .join(" / ");
+      if (label)
+        lines.push(
+          `<li class="${fail ? "bad" : "ok"}">${fail ? "×" : "✓"} 配件分类：${esc(label)}</li>`,
+        );
     }
     const meta = [spec.trader, spec.weaponName].filter(Boolean).join(" · ");
     return `<section class="wb-smith"><div class="wb-pane-head"><span>枪匠任务</span><button type="button" data-wb-smith-exit>退出</button></div><h3>${esc(spec.taskName)}</h3>${meta ? `<p class="wb-hint">${esc(meta)}</p>` : ""}${lines.length ? `<ul class="wb-checks">${lines.join("")}</ul>` : ""}<button type="button" class="wb-solve" data-wb-solve ${spec.loadable && !pending ? "" : "disabled"}>求解</button></section>`;
@@ -1102,7 +1295,9 @@ function smithPanel() {
 }
 
 function statRow(label: string, value: string, tone = "", hint = "", hintLabel = "", val = "") {
-  const info = hint ? `<span class="wb-info" tabindex="0" title="${esc(hint)}" aria-label="${esc(hintLabel || label)}说明">i</span>` : "";
+  const info = hint
+    ? `<span class="wb-info" tabindex="0" title="${esc(hint)}" aria-label="${esc(hintLabel || label)}说明">i</span>`
+    : "";
   const mark = val ? ` data-wb-val="${val}"` : "";
   return `<div class="wb-stat"><span>${esc(label)}${info}</span><strong class="${tone}"${mark}>${esc(value)}</strong></div>`;
 }
@@ -1255,7 +1450,10 @@ async function loadGuns() {
   gunsLoading = true;
   gunsError = "";
   try {
-    const data = await invoke<{ items?: Record<string, unknown>[] } | Record<string, unknown>[]>("site_get", { path: "/guides/tarkov/guns" });
+    const data = await invoke<{ items?: Record<string, unknown>[] } | Record<string, unknown>[]>(
+      "site_get",
+      { path: "/guides/tarkov/guns" },
+    );
     const list = Array.isArray(data) ? data : data.items || [];
     guns = list.flatMap((item) => {
       const row = rec(item);
@@ -1263,14 +1461,16 @@ async function loadGuns() {
       const id = str(row.id);
       const name = str(row.name || row.short_name) || id;
       if (!id || !name) return [];
-      return [{
-        id,
-        name,
-        short: str(row.short_name || row.shortName),
-        caliber: str(row.caliber),
-        weaponClass: str(row.weapon_class || row.weaponClass),
-        icon: str(row.icon_link || row.iconLink),
-      }];
+      return [
+        {
+          id,
+          name,
+          short: str(row.short_name || row.shortName),
+          caliber: str(row.caliber),
+          weaponClass: str(row.weapon_class || row.weaponClass),
+          icon: str(row.icon_link || row.iconLink),
+        },
+      ];
     });
     gunsReady = true;
   } catch (error) {
@@ -1284,7 +1484,10 @@ async function ensureSmith() {
   smithLoading = true;
   smithError = "";
   try {
-    const data = await invoke<{ items?: Record<string, unknown>[] } | Record<string, unknown>[]>("site_get", { path: "/guides/tarkov/workbench/gunsmith-tasks" });
+    const data = await invoke<{ items?: Record<string, unknown>[] } | Record<string, unknown>[]>(
+      "site_get",
+      { path: "/guides/tarkov/workbench/gunsmith-tasks" },
+    );
     const list = Array.isArray(data) ? data : data.items || [];
     smithTasks = list.flatMap((item) => {
       const row = rec(item);
@@ -1307,7 +1510,10 @@ async function loadCommunity() {
   communityError = "";
   const gunId = gun.id;
   try {
-    const data = await invoke<{ builds?: Record<string, unknown>[]; items?: Record<string, unknown>[] } | Record<string, unknown>[]>("site_get", {
+    const data = await invoke<
+      | { builds?: Record<string, unknown>[]; items?: Record<string, unknown>[] }
+      | Record<string, unknown>[]
+    >("site_get", {
       path: `/guides/tarkov/workbench/community-builds?gun_id=${encodeURIComponent(gunId)}`,
     });
     const list = Array.isArray(data) ? data : data.builds || data.items || [];
@@ -1482,7 +1688,14 @@ function install(partId: string) {
     paint();
     return;
   }
-  if (partConflicts(part, pairs.map((pair) => pair.item_id), slot.installed?.id || "", collectInstalled(slots))) {
+  if (
+    partConflicts(
+      part,
+      pairs.map((pair) => pair.item_id),
+      slot.installed?.id || "",
+      collectInstalled(slots),
+    )
+  ) {
     note = "与已装配件冲突";
     noteBad = true;
     paint();
@@ -1519,7 +1732,11 @@ async function solve() {
   try {
     const data = await invoke<Record<string, unknown>>("site_post", {
       path: "/guides/tarkov/workbench/gunsmith-solve",
-      body: { task_id: spec.taskId, objective_id: spec.objectiveId || null, ammo_id: ammoId || null },
+      body: {
+        task_id: spec.taskId,
+        objective_id: spec.objectiveId || null,
+        ammo_id: ammoId || null,
+      },
     });
     const next = pairsOf(data.pairs);
     const nextAmmo = str(data.ammo_id || data.ammoId) || ammoId;
@@ -1543,7 +1760,9 @@ async function applyCommunity(id: string) {
   if (!build || !build.loadable) return;
   communityOpen = false;
   activeSlot = "";
-  const dropped = build.dropped ? `已装入「${build.name}」，省略了 ${build.dropped} 件本站没有的配件` : `已装入「${build.name}」`;
+  const dropped = build.dropped
+    ? `已装入「${build.name}」，省略了 ${build.dropped} 件本站没有的配件`
+    : `已装入「${build.name}」`;
   const ok = await calculate(build.pairs, build.ammoId || null, true, dropped);
   if (!ok) return;
   note = dropped;
@@ -1558,7 +1777,8 @@ function togglePartSort(key: PartSortKey) {
 }
 
 function toggleBuildSort(key: CommunitySortKey) {
-  if (communitySort?.key === key) communitySort = communitySort.dir === "desc" ? { key, dir: "asc" } : null;
+  if (communitySort?.key === key)
+    communitySort = communitySort.dir === "desc" ? { key, dir: "asc" } : null;
   else communitySort = { key, dir: "desc" };
   page = 1;
   paint();
@@ -1571,12 +1791,26 @@ function onClick(event: MouseEvent) {
     closeTop();
     return;
   }
-  const el = target.closest<HTMLElement>("[data-wb-close], [data-wb-pick], [data-wb-smith-open], [data-wb-community-open], [data-wb-change], [data-wb-clear], [data-wb-restore], [data-wb-slot], [data-wb-install], [data-wb-unload], [data-wb-gun], [data-wb-task], [data-wb-build], [data-wb-solve], [data-wb-smith-exit], [data-wb-part-sort], [data-wb-build-sort], [data-wb-page]");
+  const el = target.closest<HTMLElement>(
+    "[data-wb-close], [data-wb-pick], [data-wb-smith-open], [data-wb-community-open], [data-wb-change], [data-wb-clear], [data-wb-restore], [data-wb-slot], [data-wb-install], [data-wb-unload], [data-wb-gun], [data-wb-task], [data-wb-build], [data-wb-solve], [data-wb-smith-exit], [data-wb-part-sort], [data-wb-build-sort], [data-wb-page]",
+  );
   if (!el || (el instanceof HTMLButtonElement && el.disabled)) return;
-  if (el.hasAttribute("data-wb-close")) { closeTop(); return; }
-  if (el.hasAttribute("data-wb-pick") || el.hasAttribute("data-wb-change")) { void openPick(); return; }
-  if (el.hasAttribute("data-wb-smith-open")) { void openSmith(); return; }
-  if (el.hasAttribute("data-wb-community-open")) { void openCommunity(); return; }
+  if (el.hasAttribute("data-wb-close")) {
+    closeTop();
+    return;
+  }
+  if (el.hasAttribute("data-wb-pick") || el.hasAttribute("data-wb-change")) {
+    void openPick();
+    return;
+  }
+  if (el.hasAttribute("data-wb-smith-open")) {
+    void openSmith();
+    return;
+  }
+  if (el.hasAttribute("data-wb-community-open")) {
+    void openCommunity();
+    return;
+  }
   if (el.hasAttribute("data-wb-clear")) {
     activeSlot = "";
     void calculate([], ammoId || null, true);
@@ -1597,43 +1831,91 @@ function onClick(event: MouseEvent) {
     void loadAllowed();
     return;
   }
-  if (el.dataset.wbInstall) { install(el.dataset.wbInstall); return; }
+  if (el.dataset.wbInstall) {
+    install(el.dataset.wbInstall);
+    return;
+  }
   if (el.hasAttribute("data-wb-unload")) {
     const slot = activeSlot ? findSlot(slots, activeSlot) : null;
     if (slot && !unload(slot)) paint();
     return;
   }
-  if (el.dataset.wbGun) { goWorkbench(el.dataset.wbGun); return; }
+  if (el.dataset.wbGun) {
+    goWorkbench(el.dataset.wbGun);
+    return;
+  }
   if (el.dataset.wbTask) {
     const task = smithTasks.find((item) => item.id === el.dataset.wbTask);
     if (!task?.loadable || !task.weaponId) return;
     goWorkbench(task.weaponId, task.taskId, task.objectiveId);
     return;
   }
-  if (el.dataset.wbBuild) { void applyCommunity(el.dataset.wbBuild); return; }
-  if (el.hasAttribute("data-wb-solve")) { void solve(); return; }
-  if (el.hasAttribute("data-wb-smith-exit")) { goWorkbench(gun?.id || routeGun); return; }
+  if (el.dataset.wbBuild) {
+    void applyCommunity(el.dataset.wbBuild);
+    return;
+  }
+  if (el.hasAttribute("data-wb-solve")) {
+    void solve();
+    return;
+  }
+  if (el.hasAttribute("data-wb-smith-exit")) {
+    goWorkbench(gun?.id || routeGun);
+    return;
+  }
   const partKey = el.dataset.wbPartSort;
-  if (partKey === "name" || partKey === "ergonomics" || partKey === "recoil" || partKey === "weight" || partKey === "price") {
+  if (
+    partKey === "name" ||
+    partKey === "ergonomics" ||
+    partKey === "recoil" ||
+    partKey === "weight" ||
+    partKey === "price"
+  ) {
     togglePartSort(partKey);
     return;
   }
   const buildKey = el.dataset.wbBuildSort;
-  if (buildKey === "published" || buildKey === "loads" || buildKey === "ergo" || buildKey === "evo" || buildKey === "recoilV" || buildKey === "recoilH" || buildKey === "overswing" || buildKey === "price") {
+  if (
+    buildKey === "published" ||
+    buildKey === "loads" ||
+    buildKey === "ergo" ||
+    buildKey === "evo" ||
+    buildKey === "recoilV" ||
+    buildKey === "recoilH" ||
+    buildKey === "overswing" ||
+    buildKey === "price"
+  ) {
     toggleBuildSort(buildKey);
     return;
   }
-  if (el.dataset.wbPage === "prev") { page = Math.max(1, page - 1); paint(); }
-  if (el.dataset.wbPage === "next") { page += 1; paint(); }
+  if (el.dataset.wbPage === "prev") {
+    page = Math.max(1, page - 1);
+    paint();
+  }
+  if (el.dataset.wbPage === "next") {
+    page += 1;
+    paint();
+  }
 }
 
 function onInput(event: Event) {
   const el = event.target;
   if (!(el instanceof HTMLInputElement)) return;
-  if (el.dataset.wbTune) { onTune(el); return; }
-  if (el.id === "wb-gun-q") { gunQuery = el.value; paint(); }
-  if (el.id === "wb-smith-q") { smithQuery = el.value; paint(); }
-  if (el.id === "wb-part-q") { partQuery = el.value; paint(); }
+  if (el.dataset.wbTune) {
+    onTune(el);
+    return;
+  }
+  if (el.id === "wb-gun-q") {
+    gunQuery = el.value;
+    paint();
+  }
+  if (el.id === "wb-smith-q") {
+    smithQuery = el.value;
+    paint();
+  }
+  if (el.id === "wb-part-q") {
+    partQuery = el.value;
+    paint();
+  }
 }
 
 function onChange(event: Event) {
@@ -1644,8 +1926,14 @@ function onChange(event: Event) {
     return;
   }
   if (!(el instanceof HTMLSelectElement)) return;
-  if (el.id === "wb-gun-caliber") { caliberFilter = el.value; paint(); }
-  if (el.id === "wb-gun-class") { classFilter = el.value; paint(); }
+  if (el.id === "wb-gun-caliber") {
+    caliberFilter = el.value;
+    paint();
+  }
+  if (el.id === "wb-gun-class") {
+    classFilter = el.value;
+    paint();
+  }
   if (el.id === "wb-ammo" && el.value) void calculate(pairs, el.value, true);
   if (el.id === "wb-page-size") {
     pageSize = Number(el.value) || 50;
@@ -1740,7 +2028,9 @@ export async function mountWorkbench(gunId: string) {
   gunError = "";
   host.innerHTML = spin("正在读取枪械");
   try {
-    const data = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/workbench/guns/${encodeURIComponent(gunId)}` });
+    const data = await invoke<Record<string, unknown>>("site_get", {
+      path: `/guides/tarkov/workbench/guns/${encodeURIComponent(gunId)}`,
+    });
     if (token !== seq) return;
     calcEpoch += 1;
     allowedEpoch += 1;

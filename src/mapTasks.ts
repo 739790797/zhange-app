@@ -1,7 +1,22 @@
+import { invoke } from "./tauriBridge";
 import { colorForTaskId, colorForUserId, questColor } from "./questOverlay";
 import { mapTitle } from "./mapNames";
 import { fadeIn, fadeOut } from "./motion";
 import { isPending, spin } from "./spinner";
+import {
+  cloneTaskProgress,
+  currentTaskProgressAccountEpoch,
+  emptyTaskProgress,
+  taskProgressAccountEpochIsCurrent,
+  mergeTaskProgress,
+  readTaskProgress,
+  serializeTaskProgress,
+  taskProgressBody,
+  taskProgressPath,
+  withTaskGameMode,
+  type TaskGameMode,
+  type TaskProgress,
+} from "./taskProgressQueue";
 
 type MapObjective = {
   id: string;
@@ -39,10 +54,17 @@ let done = new Set<string>();
 let started = new Set<string>();
 let failed = new Set<string>();
 let objectives: { task_id: string; objective_id: string }[] = [];
+let progressMode: TaskGameMode = "pvp";
+let progressBaseline: TaskProgress = emptyTaskProgress();
+let progressEditVersion = 0;
 let query = "";
 let scope: "map" | "all" = "map";
 let note = "正在读取任务…";
 let saving = false;
+let savingMode: TaskGameMode | null = null;
+let savingAccountEpoch: number | null = null;
+let saveGeneration = 0;
+let savingGeneration = -1;
 let hoverId = "";
 let hoverTimer = 0;
 let hoverBound = false;
@@ -56,9 +78,34 @@ let claimOrder: string[] = [];
 let claimPeople = new Map<string, { name: string; userId: number }[]>();
 let highlightId = "";
 let guideId = "";
+let mapTasksGeneration = 0;
+let loadedAccountEpoch = -1;
+let saveAgain = false;
+let deferredSaveMode: TaskGameMode | null = null;
+let deferredSave = false;
 const detailReady = new Set<string>();
 const detailLoading = new Set<string>();
 const detailFailed = new Set<string>();
+
+function gameMode(): TaskGameMode {
+  return localStorage.getItem("zhange.guides.tarkov.gameMode") === "pve" ? "pve" : "pvp";
+}
+
+function currentTaskProgress(): TaskProgress {
+  return {
+    done: new Set(done),
+    started: new Set(started),
+    failed: new Set(failed),
+    objectives: objectives.map((item) => ({ ...item })),
+  };
+}
+
+function applyTaskProgress(progress: TaskProgress) {
+  done = new Set(progress.done);
+  started = new Set(progress.started);
+  failed = new Set(progress.failed);
+  objectives = progress.objectives.map((item) => ({ ...item }));
+}
 
 const FAIL_LABEL: Record<string, string> = {
   taskStatus: "任务冲突",
@@ -69,7 +116,10 @@ const FAIL_LABEL: Record<string, string> = {
 };
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function traderSlugOf(slug: string, name: string) {
@@ -137,7 +187,9 @@ function mapKeys(slug: string) {
 function placeSlug(value: unknown) {
   if (!value || typeof value !== "object") return "";
   const row = value as Record<string, unknown>;
-  return String(row.slug || row.map_slug || row.mapSlug || "").trim().toLowerCase();
+  return String(row.slug || row.map_slug || row.mapSlug || "")
+    .trim()
+    .toLowerCase();
 }
 
 function readObjectives(raw: unknown, mapSlug: string, _taskOnMap: boolean): MapObjective[] {
@@ -150,10 +202,16 @@ function readObjectives(raw: unknown, mapSlug: string, _taskOnMap: boolean): Map
     if (!id) return [];
     const type = String(row.type || "").trim();
     const desc = String(row.description || "").trim();
-    const zones = Array.isArray(row.zone_names) ? row.zone_names.map((name) => humanName(String(name || ""))).filter(Boolean) : [];
-    const targets = Array.isArray(row.target_names) ? row.target_names.map((name) => humanName(String(name || ""))).filter(Boolean) : [];
+    const zones = Array.isArray(row.zone_names)
+      ? row.zone_names.map((name) => humanName(String(name || ""))).filter(Boolean)
+      : [];
+    const targets = Array.isArray(row.target_names)
+      ? row.target_names.map((name) => humanName(String(name || ""))).filter(Boolean)
+      : [];
     const exitName = humanName(String(row.exit_name || ""));
-    const extra = [...targets, ...zones, exitName].filter((name) => name && name !== desc && !desc.includes(name));
+    const extra = [...targets, ...zones, exitName].filter(
+      (name) => name && name !== desc && !desc.includes(name),
+    );
     let text = [desc || OBJECTIVE_LABEL[type] || "目标", ...extra]
       .flatMap((part) => part.split(" · "))
       .map((part) => part.trim())
@@ -170,7 +228,10 @@ function readObjectives(raw: unknown, mapSlug: string, _taskOnMap: boolean): Map
     const slugs = [...maps, ...zonePlaces, ...locations].map(placeSlug).filter(Boolean);
     const located = maps.length > 0 || zonePlaces.length > 0 || locations.length > 0;
     const onMap = !located || slugs.some((item) => keys.has(item));
-    const mapName = maps.map((item) => mapTitle(placeSlug(item), named(item), "")).filter(Boolean).join("、");
+    const mapName = maps
+      .map((item) => mapTitle(placeSlug(item), named(item), ""))
+      .filter(Boolean)
+      .join("、");
     return [{ id, text, mapName, onMap }];
   });
 }
@@ -190,7 +251,11 @@ function readFails(raw: unknown): MapFail[] {
 function objectiveDone(taskId: string, objectiveId: string) {
   const task = taskId.trim().toLowerCase();
   const objective = objectiveId.trim().toLowerCase();
-  return objectives.some((item) => item.task_id.trim().toLowerCase() === task && item.objective_id.trim().toLowerCase() === objective);
+  return objectives.some(
+    (item) =>
+      item.task_id.trim().toLowerCase() === task &&
+      item.objective_id.trim().toLowerCase() === objective,
+  );
 }
 
 function has(pool: Set<string>, id: string) {
@@ -211,12 +276,6 @@ function statusOf(task: MapTask): Status {
   return "todo";
 }
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
-
 function paint() {
   const host = document.querySelector("#task-body");
   if (!host) return;
@@ -232,7 +291,8 @@ function paint() {
     const icon = traderIcon(trader);
     const claimed = myClaims.has(task.id);
     const color = claimed ? questColor(Math.max(0, claimOrder.indexOf(task.id))) : "";
-    const options: Status[] = status === "failed" ? ["todo", "active", "done", "failed"] : ["todo", "active", "done"];
+    const options: Status[] =
+      status === "failed" ? ["todo", "active", "done", "failed"] : ["todo", "active", "done"];
     const canLocate = task.hasMarkers && status !== "done";
     const claimLocked = status === "done" && !claimed;
     return `<article class="map-task status-${status}${claimed ? " claimed" : ""}${highlightId === task.id ? " focused" : ""}" data-map-task-row="${esc(task.id)}">
@@ -246,19 +306,24 @@ function paint() {
       ${canLocate ? `<button type="button" class="map-task-locate" data-map-task-locate="${esc(task.id)}" title="定位到地图点位" aria-label="定位到地图点位">⌖</button>` : `<span class="map-task-locate"></span>`}
     </article>`;
   };
-  const pin = (group: MapTask[]) => [...group.filter((task) => myClaims.has(task.id)), ...group.filter((task) => !myClaims.has(task.id))];
-  const blocks = order.map((status) => {
-    const group = pin(visible.filter((task) => statusOf(task) === status));
-    if (!group.length) return "";
-    if (status !== "active") {
-      return `<p class="map-task-label" data-status="${status}">${STATUS_LABEL[status]} ${group.length}</p>${group.map(row).join("")}`;
-    }
-    const here = group.filter((task) => task.onMap);
-    const elsewhere = group.filter((task) => !task.onMap);
-    return `<p class="map-task-label" data-status="active">${STATUS_LABEL.active} ${group.length}</p>
+  const pin = (group: MapTask[]) => [
+    ...group.filter((task) => myClaims.has(task.id)),
+    ...group.filter((task) => !myClaims.has(task.id)),
+  ];
+  const blocks = order
+    .map((status) => {
+      const group = pin(visible.filter((task) => statusOf(task) === status));
+      if (!group.length) return "";
+      if (status !== "active") {
+        return `<p class="map-task-label" data-status="${status}">${STATUS_LABEL[status]} ${group.length}</p>${group.map(row).join("")}`;
+      }
+      const here = group.filter((task) => task.onMap);
+      const elsewhere = group.filter((task) => !task.onMap);
+      return `<p class="map-task-label" data-status="active">${STATUS_LABEL.active} ${group.length}</p>
       ${here.length ? `<p class="map-task-sub">本地图任务 ${here.length}</p>${here.map(row).join("")}` : ""}
       ${elsewhere.length ? `<p class="map-task-sub">非本地图任务 ${elsewhere.length}</p>${elsewhere.map(row).join("")}` : ""}`;
-  }).join("");
+    })
+    .join("");
   host.innerHTML = `
     <div class="map-task-tools">
       <input data-map-task-query value="${esc(query)}" placeholder="搜任务" />
@@ -267,7 +332,7 @@ function paint() {
         <button type="button" data-map-task-scope="all" class="${scope === "all" ? "on" : ""}">全部</button>
       </div>
     </div>
-    ${tasks.length ? "" : (isPending(note) ? spin(note, true) : `<p>${esc(note)}</p>`)}
+    ${tasks.length ? "" : isPending(note) ? spin(note, true) : `<p>${esc(note)}</p>`}
     ${blocks}
     ${tasks.length && !visible.length ? `<p>没有匹配的任务。</p>` : ""}`;
   const panel = host.closest("#task-panel");
@@ -305,23 +370,33 @@ function hideFloat() {
 }
 
 async function ensureDetail(task: MapTask) {
-  if (detailReady.has(task.id) || detailLoading.has(task.id) || !slug) return;
+  const mapSlug = slug;
+  const mode = progressMode;
+  const generation = mapTasksGeneration;
+  const loadKey = `${generation}:${mapSlug}:${task.id}`;
+  if (detailReady.has(task.id) || detailLoading.has(loadKey) || !mapSlug) return;
   detailFailed.delete(task.id);
-  detailLoading.add(task.id);
+  detailLoading.add(loadKey);
   try {
     const data = await invoke<{ items?: Record<string, unknown>[] }>("site_get", {
-      path: `/guides/tarkov/raid-prep?map=${encodeURIComponent(slug)}&geometry=true&ids=${encodeURIComponent(task.id)}`,
+      path: withTaskGameMode(
+        `/guides/tarkov/raid-prep?map=${encodeURIComponent(mapSlug)}&geometry=true&ids=${encodeURIComponent(task.id)}`,
+        mode,
+      ),
     });
+    if (generation !== mapTasksGeneration || slug !== mapSlug) return;
     const source = (data.items || []).find((item) => String(item.id || "") === task.id);
-    task.objectives = readObjectives(source?.objectives, slug, task.onMap);
+    task.objectives = readObjectives(source?.objectives, mapSlug, task.onMap);
     task.fails = readFails(source?.fail_conditions);
     detailReady.add(task.id);
   } catch {
-    detailFailed.add(task.id);
+    if (generation === mapTasksGeneration && slug === mapSlug) detailFailed.add(task.id);
   } finally {
-    detailLoading.delete(task.id);
-    if (hoverId === task.id && hoverAnchor) showFloat(task, hoverAnchor, false);
-    if (guideId === task.id) paintGuide();
+    detailLoading.delete(loadKey);
+    if (generation === mapTasksGeneration && slug === mapSlug) {
+      if (hoverId === task.id && hoverAnchor) showFloat(task, hoverAnchor, false);
+      if (guideId === task.id) paintGuide();
+    }
   }
 }
 
@@ -347,7 +422,9 @@ function showFloat(task: MapTask, anchor: HTMLElement, fetch = true) {
   const icon = traderIcon(traderSlugOf(task.traderSlug, task.trader));
   const ready = detailReady.has(task.id);
   const body = !ready
-    ? (detailFailed.has(task.id) ? `<p class="map-task-float-loading">加载失败</p>` : spin("正在加载", true))
+    ? detailFailed.has(task.id)
+      ? `<p class="map-task-float-loading">加载失败</p>`
+      : spin("正在加载", true)
     : `${here.length ? `<div class="map-task-float-here">${here.map((item) => line(item, true)).join("")}</div>` : ""}
     ${[...groups.entries()].map(([name, items]) => `<div class="map-task-float-else"><p>${esc(name)}</p>${items.map((item) => line(item, false)).join("")}</div>`).join("")}
     ${!task.objectives.length && !task.fails.length ? `<p class="map-task-float-empty">无目标数据</p>` : ""}
@@ -369,7 +446,8 @@ function showFloat(task: MapTask, anchor: HTMLElement, fetch = true) {
   let left = edge - box.width - 10;
   if (left < 8) left = row.right + 10;
   let top = row.top;
-  if (top + box.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - 8 - box.height);
+  if (top + box.height > window.innerHeight - 8)
+    top = Math.max(8, window.innerHeight - 8 - box.height);
   node.style.left = `${Math.max(8, left)}px`;
   node.style.top = `${top}px`;
 }
@@ -400,7 +478,9 @@ function bindHover() {
     const target = event.target;
     if (!(target instanceof Element)) return;
     const next = event.relatedTarget;
-    const inside = next instanceof Element && (next.closest("[data-map-task-row]") || next.closest("#map-task-float"));
+    const inside =
+      next instanceof Element &&
+      (next.closest("[data-map-task-row]") || next.closest("#map-task-float"));
     if (inside) return;
     if (!target.closest("[data-map-task-row]") && !target.closest("#map-task-float")) return;
     window.clearTimeout(hoverTimer);
@@ -409,8 +489,17 @@ function bindHover() {
   document.addEventListener("scroll", hideFloat, true);
 }
 
-export function patchLoggedQuest(kind: "started" | "failed" | "completed", taskId: string) {
-  if (!tasks.length) return;
+export function patchLoggedQuest(
+  kind: "started" | "failed" | "completed",
+  taskId: string,
+  mode: TaskGameMode = progressMode,
+) {
+  if (
+    !tasks.length ||
+    mode !== progressMode ||
+    loadedAccountEpoch !== currentTaskProgressAccountEpoch()
+  )
+    return false;
   const known = tasks.find((item) => item.id.trim().toLowerCase() === taskId.trim().toLowerCase());
   const id = known?.id || taskId;
   drop(done, id);
@@ -419,22 +508,60 @@ export function patchLoggedQuest(kind: "started" | "failed" | "completed", taskI
   if (kind === "completed") done.add(id);
   else if (kind === "failed") failed.add(id);
   else started.add(id);
+  progressEditVersion += 1;
   paint();
   progressWatch?.();
+  return true;
 }
 
 export function clearMapTasks() {
+  mapTasksGeneration += 1;
+  saveGeneration += 1;
   slug = "";
   tasks = [];
+  done.clear();
+  started.clear();
+  failed.clear();
+  objectives = [];
+  progressMode = gameMode();
+  progressBaseline = emptyTaskProgress();
+  progressEditVersion += 1;
+  loadedAccountEpoch = -1;
+  note = "正在读取任务…";
+  saving = false;
+  savingMode = null;
+  savingAccountEpoch = null;
+  savingGeneration = -1;
+  saveAgain = false;
+  deferredSaveMode = null;
+  deferredSave = false;
+  detailReady.clear();
+  detailLoading.clear();
+  detailFailed.clear();
+  myClaims.clear();
+  claimOrder = [];
+  claimPeople.clear();
+  highlightId = "";
+  guideId = "";
+  hideFloat();
+  paintGuide();
 }
 
 export async function mountMapTasks(next: string) {
   bindHover();
   if (!document.querySelector("#task-body")) return;
-  if (slug === next && tasks.length) {
+  const mode = gameMode();
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  if (
+    slug === next &&
+    tasks.length &&
+    progressMode === mode &&
+    loadedAccountEpoch === accountEpoch
+  ) {
     paint();
     return;
   }
+  const generation = ++mapTasksGeneration;
   slug = next;
   note = "正在读取任务…";
   tasks = [];
@@ -445,33 +572,54 @@ export async function mountMapTasks(next: string) {
   paint();
   try {
     const [list, progress] = await Promise.all([
-      invoke<{ items?: Record<string, unknown>[] }>("site_get", { path: `/guides/tarkov/raid-prep?map=${encodeURIComponent(next)}` }),
-      invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" }),
+      invoke<{ items?: Record<string, unknown>[] }>("site_get", {
+        path: withTaskGameMode(`/guides/tarkov/raid-prep?map=${encodeURIComponent(next)}`, mode),
+      }),
+      serializeTaskProgress(async () => {
+        if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return emptyTaskProgress();
+        const raw = await invoke<Record<string, unknown>>("site_get", {
+          path: taskProgressPath(mode),
+        });
+        if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return emptyTaskProgress();
+        return readTaskProgress(raw);
+      }),
     ]);
-    if (slug !== next) return;
-    tasks = (list.items || []).map((item) => ({
-      id: String(item.id || ""),
-      name: String(item.name || item.normalized_name || item.id || ""),
-      trader: String(item.trader_name || item.traderName || ""),
-      traderSlug: String(item.trader_slug || item.traderSlug || ""),
-      onMap: Boolean(item.on_this_map ?? item.onThisMap),
-      mapName: String(item.map_name || item.mapName || ""),
-      hasMarkers: Boolean(item.has_map_markers ?? item.hasMapMarkers),
-      objectives: [],
-      fails: [],
-    })).filter((item) => item.id);
+    if (
+      generation !== mapTasksGeneration ||
+      slug !== next ||
+      !taskProgressAccountEpochIsCurrent(accountEpoch)
+    )
+      return;
+    tasks = (list.items || [])
+      .map((item) => ({
+        id: String(item.id || ""),
+        name: String(item.name || item.normalized_name || item.id || ""),
+        trader: String(item.trader_name || item.traderName || ""),
+        traderSlug: String(item.trader_slug || item.traderSlug || ""),
+        onMap: Boolean(item.on_this_map ?? item.onThisMap),
+        mapName: String(item.map_name || item.mapName || ""),
+        hasMarkers: Boolean(item.has_map_markers ?? item.hasMapMarkers),
+        objectives: [],
+        fails: [],
+      }))
+      .filter((item) => item.id);
     for (const task of tasks) {
       const source = (list.items || []).find((item) => String(item.id || "") === task.id);
       task.objectives = readObjectives(source?.objectives, next, task.onMap);
       task.fails = readFails(source?.fail_conditions);
     }
-    done = new Set((Array.isArray(progress.task_ids) ? progress.task_ids : []).map(String));
-    started = new Set((Array.isArray(progress.started_ids) ? progress.started_ids : []).map(String));
-    failed = new Set((Array.isArray(progress.failed_ids) ? progress.failed_ids : []).map(String));
-    objectives = Array.isArray(progress.objective_dones) ? progress.objective_dones as { task_id: string; objective_id: string }[] : [];
+    progressMode = mode;
+    progressBaseline = cloneTaskProgress(progress);
+    applyTaskProgress(progress);
+    loadedAccountEpoch = accountEpoch;
     note = tasks.length ? "" : "这张图没有任务";
   } catch (error) {
-    if (slug !== next) return;
+    if (
+      generation !== mapTasksGeneration ||
+      slug !== next ||
+      !taskProgressAccountEpochIsCurrent(accountEpoch)
+    )
+      return;
     note = error instanceof Error ? error.message : "任务读取失败";
     tasks = [];
   }
@@ -479,14 +627,63 @@ export async function mountMapTasks(next: string) {
   progressWatch?.();
 }
 
-export function watchMapTasks(onProgress: () => void, onClaim: (id: string, on: boolean) => void, onLocate: (id: string) => void, onObjective: (taskId: string, objectiveId: string, done: boolean) => void) {
+export async function reloadMapTaskProgress(mode: TaskGameMode = progressMode) {
+  if (!slug || !tasks.length || mode !== progressMode) return;
+  const generation = mapTasksGeneration;
+  const slugAtStart = slug;
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  const localAtStart = cloneTaskProgress(currentTaskProgress());
+  const editVersionAtStart = progressEditVersion;
+  try {
+    const progress = await serializeTaskProgress(async () => {
+      if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return null;
+      const raw = await invoke<Record<string, unknown>>("site_get", {
+        path: taskProgressPath(mode),
+      });
+      if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return null;
+      return readTaskProgress(raw);
+    });
+    if (
+      !progress ||
+      generation !== mapTasksGeneration ||
+      slugAtStart !== slug ||
+      !taskProgressAccountEpochIsCurrent(accountEpoch) ||
+      mode !== progressMode ||
+      !tasks.length
+    )
+      return;
+    progressBaseline = cloneTaskProgress(progress);
+    if (editVersionAtStart === progressEditVersion) {
+      applyTaskProgress(progress);
+    } else {
+      const reconciled = mergeTaskProgress(localAtStart, progress, currentTaskProgress()).progress;
+      applyTaskProgress(reconciled);
+      if (mergeTaskProgress(progress, reconciled, progress).applied) void save(mode);
+    }
+    paint();
+    if (guideId) paintGuide();
+    progressWatch?.();
+  } catch {
+    /* 保留当前屏幕进度，等待下一次刷新 */
+  }
+}
+
+export function watchMapTasks(
+  onProgress: () => void,
+  onClaim: (id: string, on: boolean) => void,
+  onLocate: (id: string) => void,
+  onObjective: (taskId: string, objectiveId: string, done: boolean) => void,
+) {
   progressWatch = onProgress;
   claimWatch = onClaim;
   locateWatch = onLocate;
   objectiveWatch = onObjective;
 }
 
-export function applyRoomClaims(claims: { taskId: string; userId: number; name: string }[], selfId: number) {
+export function applyRoomClaims(
+  claims: { taskId: string; userId: number; name: string }[],
+  selfId: number,
+) {
   const mine = new Set<string>();
   const order: string[] = [];
   const seen = new Set<string>();
@@ -502,7 +699,8 @@ export function applyRoomClaims(claims: { taskId: string; userId: number; name: 
   const people = new Map<string, { name: string; userId: number }[]>();
   for (const claim of claims) {
     const list = people.get(claim.taskId) || [];
-    if (!list.some((item) => item.userId === claim.userId)) list.push({ name: claim.name || `用户${claim.userId}`, userId: claim.userId });
+    if (!list.some((item) => item.userId === claim.userId))
+      list.push({ name: claim.name || `用户${claim.userId}`, userId: claim.userId });
     people.set(claim.taskId, list);
   }
   claimPeople = people;
@@ -520,17 +718,24 @@ export function mapQuestProgress() {
   return {
     started: [...started],
     done: [...done],
-    objectives: objectives.map((item) => ({ taskId: item.task_id, objectiveId: item.objective_id })),
+    objectives: objectives.map((item) => ({
+      taskId: item.task_id,
+      objectiveId: item.objective_id,
+    })),
     onMapIds: tasks.filter((task) => task.onMap).map((task) => task.id),
   };
 }
 
 function guideUrl(id: string) {
-  return /^[a-f0-9]{24}$/i.test(id) ? `https://www.eftarkov.com/news/id/${encodeURIComponent(id)}.html` : "";
+  return /^[a-f0-9]{24}$/i.test(id)
+    ? `https://www.eftarkov.com/news/id/${encodeURIComponent(id)}.html`
+    : "";
 }
 
 function guideTasks() {
-  const picked = claimOrder.map((id) => tasks.find((task) => task.id === id)).filter((task): task is MapTask => Boolean(task));
+  const picked = claimOrder
+    .map((id) => tasks.find((task) => task.id === id))
+    .filter((task): task is MapTask => Boolean(task));
   const current = tasks.find((task) => task.id === guideId);
   if (current && !picked.some((task) => task.id === current.id)) return [current, ...picked];
   return picked.length ? picked : current ? [current] : [];
@@ -557,21 +762,37 @@ function paintGuide() {
   const rows = guideTasks();
   const active = rows.find((task) => task.id === guideId) || rows[0];
   if (active && !detailReady.has(active.id)) void ensureDetail(active);
-  const people = (id: string) => (claimPeople.get(id) || []).map((person) => `<span class="map-guide-person"><i style="background:${colorForUserId(person.userId)}"></i>${esc(person.name)}</span>`).join("") || `<span class="map-guide-none">—</span>`;
-  const side = rows.map((task) => {
-    const on = task.id === guideId;
-    const doneTask = statusOf(task) === "done";
-    const icon = traderIcon(traderSlugOf(task.traderSlug, task.trader));
-    return `<button type="button" class="map-guide-row${on ? " on" : ""}" data-map-guide-task="${esc(task.id)}">
+  const people = (id: string) =>
+    (claimPeople.get(id) || [])
+      .map(
+        (person) =>
+          `<span class="map-guide-person"><i style="background:${colorForUserId(person.userId)}"></i>${esc(person.name)}</span>`,
+      )
+      .join("") || `<span class="map-guide-none">—</span>`;
+  const side = rows
+    .map((task) => {
+      const on = task.id === guideId;
+      const doneTask = statusOf(task) === "done";
+      const icon = traderIcon(traderSlugOf(task.traderSlug, task.trader));
+      return `<button type="button" class="map-guide-row${on ? " on" : ""}" data-map-guide-task="${esc(task.id)}">
       <span class="map-guide-people">${people(task.id)}</span>
       <span class="map-guide-task"><i style="background:${colorForTaskId(task.id)}"></i>${icon ? `<img src="${esc(icon)}" alt="" />` : ""}<span class="${doneTask ? "done" : ""}">${esc(task.name)}</span></span>
     </button>`;
-  }).join("");
+    })
+    .join("");
   const progress = active
-    ? `<div class="map-guide-progress"><p>任务进度</p>${active.objectives.length ? active.objectives.map((item) => {
-        const checked = statusOf(active) === "done" || objectiveDone(active.id, item.id);
-        return `<label class="map-task-obj${checked ? " done" : ""}"><input type="checkbox" data-map-obj="${esc(item.id)}" data-map-obj-task="${esc(active.id)}" ${checked ? "checked" : ""} /><span>${esc(item.text)}</span></label>`;
-      }).join("") : (detailReady.has(active.id) ? `<p class="map-guide-none">无目标数据</p>` : spin("正在加载", true))}</div>`
+    ? `<div class="map-guide-progress"><p>任务进度</p>${
+        active.objectives.length
+          ? active.objectives
+              .map((item) => {
+                const checked = statusOf(active) === "done" || objectiveDone(active.id, item.id);
+                return `<label class="map-task-obj${checked ? " done" : ""}"><input type="checkbox" data-map-obj="${esc(item.id)}" data-map-obj-task="${esc(active.id)}" ${checked ? "checked" : ""} /><span>${esc(item.text)}</span></label>`;
+              })
+              .join("")
+          : detailReady.has(active.id)
+            ? `<p class="map-guide-none">无目标数据</p>`
+            : spin("正在加载", true)
+      }</div>`
     : "";
   const url = active ? guideUrl(active.id) : "";
   node.innerHTML = `<div class="map-guide-card">
@@ -609,12 +830,19 @@ export function revealMapTask(id: string) {
 }
 
 export function setMapObjective(taskId: string, objectiveId: string, nextDone: boolean) {
-  objectives = objectives.filter((item) => !(item.task_id.trim().toLowerCase() === taskId.trim().toLowerCase() && item.objective_id.trim().toLowerCase() === objectiveId.trim().toLowerCase()));
+  objectives = objectives.filter(
+    (item) =>
+      !(
+        item.task_id.trim().toLowerCase() === taskId.trim().toLowerCase() &&
+        item.objective_id.trim().toLowerCase() === objectiveId.trim().toLowerCase()
+      ),
+  );
   if (nextDone) objectives.push({ task_id: taskId, objective_id: objectiveId });
   if (!nextDone && has(done, taskId)) {
     drop(done, taskId);
     started.add(taskId);
   }
+  progressEditVersion += 1;
   const host = document.querySelector<HTMLElement>("#map-task-float");
   if (host && hoverId === taskId) {
     const task = tasks.find((item) => item.id === taskId);
@@ -624,26 +852,77 @@ export function setMapObjective(taskId: string, objectiveId: string, nextDone: b
   if (guideId) paintGuide();
 }
 
-async function save() {
+async function save(mode: TaskGameMode = progressMode) {
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  const generation = saveGeneration;
+  const isCurrentSave = () =>
+    generation === saveGeneration && taskProgressAccountEpochIsCurrent(accountEpoch);
+  if (saving && savingAccountEpoch === accountEpoch && savingGeneration === generation) {
+    if (savingMode === mode) saveAgain = true;
+    else {
+      deferredSaveMode = mode;
+      deferredSave = true;
+    }
+    return;
+  }
   saving = true;
+  savingMode = mode;
+  savingAccountEpoch = accountEpoch;
+  savingGeneration = generation;
   paint();
   try {
-    await invoke("site_put", {
-      path: "/guides/tarkov/task-dones",
-      body: {
-        task_ids: [...done],
-        started_ids: [...started],
-        failed_ids: [...failed],
-        objective_dones: objectives,
-        replace: true,
-      },
-    });
+    do {
+      if (!isCurrentSave() || mode !== progressMode) break;
+      saveAgain = false;
+      const result = await serializeTaskProgress(async () => {
+        if (!isCurrentSave() || mode !== progressMode) return null;
+        const localAtStart = cloneTaskProgress(currentTaskProgress());
+        const editVersionAtStart = progressEditVersion;
+        const baseline = cloneTaskProgress(progressBaseline);
+        const raw = await invoke<Record<string, unknown>>("site_get", {
+          path: taskProgressPath(mode),
+        });
+        if (!isCurrentSave() || mode !== progressMode) return null;
+        const latest = readTaskProgress(raw);
+        const merged = mergeTaskProgress(baseline, localAtStart, latest);
+        if (merged.applied) {
+          if (!isCurrentSave() || mode !== progressMode) return null;
+          await invoke("site_put", {
+            path: taskProgressPath(mode),
+            body: taskProgressBody(merged.progress),
+          });
+          if (!isCurrentSave()) return null;
+        }
+        return { localAtStart, editVersionAtStart, progress: merged.progress };
+      });
+      if (!isCurrentSave() || mode !== progressMode || !result) break;
+      progressBaseline = cloneTaskProgress(result.progress);
+      if (result.editVersionAtStart === progressEditVersion) {
+        applyTaskProgress(result.progress);
+      } else {
+        applyTaskProgress(
+          mergeTaskProgress(result.localAtStart, result.progress, currentTaskProgress()).progress,
+        );
+        saveAgain = true;
+      }
+    } while (saveAgain && isCurrentSave() && mode === progressMode);
   } catch (error) {
-    note = error instanceof Error ? error.message : "保存失败";
+    if (isCurrentSave()) note = error instanceof Error ? error.message : "保存失败";
   } finally {
-    saving = false;
-    paint();
-    progressWatch?.();
+    if (isCurrentSave() && savingAccountEpoch === accountEpoch && savingGeneration === generation) {
+      saving = false;
+      savingMode = null;
+      savingAccountEpoch = null;
+      savingGeneration = -1;
+      paint();
+      progressWatch?.();
+      const nextMode = deferredSaveMode;
+      const shouldSaveDeferred = deferredSave;
+      deferredSaveMode = null;
+      deferredSave = false;
+      saveAgain = false;
+      if (shouldSaveDeferred && nextMode && nextMode === progressMode) void save(nextMode);
+    }
   }
 }
 
@@ -664,7 +943,14 @@ const COLUMN_TYPE: Record<string, string> = {
 const BRING_TYPES = ["plantItem", "mark", "useItem"];
 const REST_TYPES = ["findItem", "giveItem"];
 
-type SummaryNeed = { id: string; name: string; count: number; icon: string; fir: boolean; type: string };
+type SummaryNeed = {
+  id: string;
+  name: string;
+  count: number;
+  icon: string;
+  fir: boolean;
+  type: string;
+};
 type SummaryRow = {
   id: string;
   name: string;
@@ -725,7 +1011,15 @@ function summaryRows(items: Record<string, unknown>[]): SummaryRow[] {
   return picked.map((task) => {
     const source = byId.get(task.id);
     const objectives = Array.isArray(source?.objectives) ? source.objectives : [];
-    const row: SummaryRow = { id: task.id, name: task.name, traderSlug: traderSlugOf(task.traderSlug, task.trader), keys: [], bring: [], columns: {}, shoot: [] };
+    const row: SummaryRow = {
+      id: task.id,
+      name: task.name,
+      traderSlug: traderSlugOf(task.traderSlug, task.trader),
+      keys: [],
+      bring: [],
+      columns: {},
+      shoot: [],
+    };
     for (const raw of objectives) {
       if (!raw || typeof raw !== "object") continue;
       const obj = raw as Record<string, unknown>;
@@ -738,14 +1032,30 @@ function summaryRows(items: Record<string, unknown>[]): SummaryRow[] {
       const needs = readNeeds(obj.items, count, fir, type);
       if (BRING_TYPES.includes(type)) {
         if (needs.length) needs.forEach((item) => pushNeed(row.bring, item));
-        else if (String(obj.description || "").trim()) pushNeed(row.bring, { id: String(obj.description), name: String(obj.description).trim(), count: 1, icon: "", fir: false, type });
+        else if (String(obj.description || "").trim())
+          pushNeed(row.bring, {
+            id: String(obj.description),
+            name: String(obj.description).trim(),
+            count: 1,
+            icon: "",
+            fir: false,
+            type,
+          });
       } else if (type === "shoot") {
         const text = String(obj.description || "").trim();
         if (text) row.shoot.push({ text, count });
       } else if (REST_TYPES.includes(type)) {
         const bucket = row.columns[type] || [];
         if (needs.length) needs.forEach((item) => pushNeed(bucket, item));
-        else if (String(obj.description || "").trim()) pushNeed(bucket, { id: String(obj.description), name: String(obj.description).trim(), count: 1, icon: "", fir, type });
+        else if (String(obj.description || "").trim())
+          pushNeed(bucket, {
+            id: String(obj.description),
+            name: String(obj.description).trim(),
+            count: 1,
+            icon: "",
+            fir,
+            type,
+          });
         if (bucket.length) row.columns[type] = bucket;
       }
       for (const key of readNeeds(obj.required_keys || obj.requiredKeys, 1, false, "key")) {
@@ -782,7 +1092,12 @@ function chip(item: SummaryNeed) {
 }
 
 function lineCount(row: SummaryRow) {
-  const sizes = [row.keys.length, row.bring.length, row.shoot.length, ...REST_TYPES.map((type) => row.columns[type]?.length || 0)];
+  const sizes = [
+    row.keys.length,
+    row.bring.length,
+    row.shoot.length,
+    ...REST_TYPES.map((type) => row.columns[type]?.length || 0),
+  ];
   return Math.max(1, ...sizes);
 }
 
@@ -799,6 +1114,7 @@ export async function openMapSummary() {
   const modal = document.querySelector<HTMLElement>("#map-summary-modal");
   const body = document.querySelector("#map-summary-body");
   if (!modal || !body) return;
+  const mode = progressMode;
   fadeIn(modal);
   const picked = tasks.filter((task) => statusOf(task) === "active" && task.onMap);
   if (!picked.length) {
@@ -807,9 +1123,15 @@ export async function openMapSummary() {
   }
   body.innerHTML = spin("正在加载");
   try {
-    const ids = picked.map((task) => task.id).slice(0, 40).join(",");
+    const ids = picked
+      .map((task) => task.id)
+      .slice(0, 40)
+      .join(",");
     const data = await invoke<{ items?: Record<string, unknown>[] }>("site_get", {
-      path: `/guides/tarkov/raid-prep?map=${encodeURIComponent(slug)}&geometry=true&ids=${encodeURIComponent(ids)}`,
+      path: withTaskGameMode(
+        `/guides/tarkov/raid-prep?map=${encodeURIComponent(slug)}&geometry=true&ids=${encodeURIComponent(ids)}`,
+        mode,
+      ),
     });
     const rows = summaryRows(data.items || []);
     const extra = REST_TYPES.filter((type) => rows.some((row) => row.columns[type]?.length));
@@ -828,28 +1150,32 @@ export async function openMapSummary() {
     const kitHtml = kit.size
       ? `<div class="map-summary-kit-list">${[...kit.values()].map((item) => chip(item)).join("")}</div>`
       : `<span class="map-summary-kit-empty">没有要带进战局的藏匿 / 标记 / 使用物</span>`;
-    const bodyRows = rows.flatMap((row) => {
-      const total = lineCount(row);
-      const icon = traderIcon(row.traderSlug);
-      return Array.from({ length: total }, (_, index) => {
-        const key = row.keys[index];
-        const bring = row.bring[index];
-        const shoot = row.shoot[index];
-        const continued = index < total - 1 ? " sum-cont" : "";
-        return `<tr class="sum-mine${continued}">
+    const bodyRows = rows
+      .flatMap((row) => {
+        const total = lineCount(row);
+        const icon = traderIcon(row.traderSlug);
+        return Array.from({ length: total }, (_, index) => {
+          const key = row.keys[index];
+          const bring = row.bring[index];
+          const shoot = row.shoot[index];
+          const continued = index < total - 1 ? " sum-cont" : "";
+          return `<tr class="sum-mine${continued}">
           <td>${index === 0 ? `<span class="sum-person"><i></i>你</span>` : ""}</td>
           <td>${index === 0 ? `<div class="map-summary-task"><i class="sum-swatch" style="background:${taskColor(row.id)}"></i>${icon ? `<img src="${esc(icon)}" alt="" />` : ""}<strong>${esc(row.name)}</strong></div>` : ""}</td>
           <td class="sum-col sum-col-first${showBring ? "" : " sum-col-last"}">${key ? chip(key) : blank(index, "无所需钥匙")}</td>
           ${showBring ? `<td class="sum-col sum-col-last">${bring ? `<span class="sum-bring-item">${typeChip(bring.type)}${chip(bring)}</span>` : blank(index, "—")}</td>` : ""}
-          ${extra.map((type) => {
-            const item = row.columns[type]?.[index];
-            return `<td>${item ? chip(item) : blank(index, "—")}</td>`;
-          }).join("")}
+          ${extra
+            .map((type) => {
+              const item = row.columns[type]?.[index];
+              return `<td>${item ? chip(item) : blank(index, "—")}</td>`;
+            })
+            .join("")}
           ${showShoot ? `<td class="sum-shoot">${shoot ? `<span class="sum-shoot-text">${esc(shoot.text)}${shoot.count > 1 ? `<b>×${shoot.count}</b>` : ""}</span>` : blank(index, "—")}</td>` : ""}
           <td></td>
         </tr>`;
-      });
-    }).join("");
+        });
+      })
+      .join("");
     body.innerHTML = `
       <div class="map-summary-kit"><span class="map-summary-kit-label">你要准备的东西：</span>${kitHtml}</div>
       <div class="map-summary-scroll">
@@ -898,17 +1224,20 @@ export function onMapTaskChange(target: EventTarget | null) {
     const task = tasks.find((item) => item.id === id);
     const ids = (task?.objectives || []).map((objective) => objective.id);
     for (const objectiveId of ids) {
-      if (!objectiveDone(id, objectiveId)) objectives.push({ task_id: id, objective_id: objectiveId });
+      if (!objectiveDone(id, objectiveId))
+        objectives.push({ task_id: id, objective_id: objectiveId });
     }
     for (const objectiveId of ids) objectiveWatch?.(id, objectiveId, true);
   } else if (next === "active") started.add(id);
   else if (next === "failed") failed.add(id);
+  progressEditVersion += 1;
   void save();
   return true;
 }
 
 export function onMapTaskInput(target: EventTarget | null) {
-  if (!(target instanceof HTMLInputElement) || !target.matches("[data-map-task-query]")) return false;
+  if (!(target instanceof HTMLInputElement) || !target.matches("[data-map-task-query]"))
+    return false;
   query = target.value.trim();
   paint();
   const input = document.querySelector<HTMLInputElement>("[data-map-task-query]");

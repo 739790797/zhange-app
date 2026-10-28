@@ -1,11 +1,35 @@
+import { invoke } from "./tauriBridge";
 import { listen } from "@tauri-apps/api/event";
-import { currentMapSlug, onLiveMapReady, setPlayerMarks, setPulseLines, setShotNote, type PlayerMark } from "./liveMap";
+import {
+  currentMapSlug,
+  onLiveMapReady,
+  setPlayerMarks,
+  setPulseLines,
+  setShotNote,
+  type PlayerMark,
+} from "./liveMap";
 import { sameMap } from "./mapNames";
+import { LatestReadGuard } from "./snapshotRevision";
 
 const FRESH_MS = 8 * 60_000;
 const PULSE_MS = 3_000;
-const AUTO_PHASE = new Set(["map_loading", "matching", "match_found", "raid_starting", "raid_started"]);
-const COLORS = ["#e8c36a", "#6cb6ff", "#6fbf4a", "#e08a2c", "#d44a4a", "#c77dff", "#4ab8b8", "#f0a3c2"];
+const AUTO_PHASE = new Set([
+  "map_loading",
+  "matching",
+  "match_found",
+  "raid_starting",
+  "raid_started",
+]);
+const COLORS = [
+  "#e8c36a",
+  "#6cb6ff",
+  "#6fbf4a",
+  "#e08a2c",
+  "#d44a4a",
+  "#c77dff",
+  "#4ab8b8",
+  "#f0a3c2",
+];
 
 type ShotState = {
   bound: boolean;
@@ -48,6 +72,9 @@ let raidId = "";
 let syncEnabled = true;
 let hotkeyLabel = "Print Screen";
 let seated = new Set<number>();
+let memberIds = new Set<number>();
+let membersKnown = false;
+let activeRoomId = "";
 let shot: ShotState | null = null;
 let local: LocalFix | null = null;
 let sentSig = "";
@@ -55,17 +82,21 @@ let followed = "";
 let flew = false;
 const seenFix = new Map<number, string>();
 let pulsePrimed = false;
-type Pulse = { key: string; x1: number; z1: number; x2: number; z2: number; color: string; bornAt: number };
+type Pulse = {
+  key: string;
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  color: string;
+  bornAt: number;
+};
 let pulses: Pulse[] = [];
 let phaseSig = "";
 const people = new Map<number, string>();
 const remote = new Map<number, RemoteFix>();
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
+const shotSettingsRead = new LatestReadGuard();
+const shotStateRead = new LatestReadGuard();
 
 export function shotHotkeyLabel(key: string) {
   if (!key || key === "PrintScreen") return "Print Screen";
@@ -84,6 +115,8 @@ function fresh(at: number, now = Date.now()) {
 }
 
 function finite(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
 }
@@ -105,7 +138,7 @@ function suppressed() {
 }
 
 function localUsable() {
-  if (!local || !fresh(local.at)) return false;
+  if (!syncEnabled || !local || !fresh(local.at)) return false;
   return !suppressed();
 }
 
@@ -195,7 +228,8 @@ function note(showing: boolean) {
   if (!syncEnabled) return "截图同步已关闭";
   if (suppressed()) return "这场战局在另一张图上，位置不会标在这里";
   if (shot.fileName && shot.x == null) return `截图无坐标，请在战局里用 ${hotkeyLabel}`;
-  if (shot.fileName && shot.x != null && !fresh(shot.modifiedMs)) return "最近一张截图已过期，请在战局里再截一次";
+  if (shot.fileName && shot.x != null && !fresh(shot.modifiedMs))
+    return "最近一张截图已过期，请在战局里再截一次";
   return `战局里按 ${hotkeyLabel}，位置会同步到房间`;
 }
 
@@ -204,7 +238,7 @@ function applyShot(next: ShotState, follow: boolean) {
   const x = finite(next.x);
   const y = finite(next.y);
   const z = finite(next.z);
-  if (x != null && y != null && z != null && fresh(next.modifiedMs)) {
+  if (syncEnabled && x != null && y != null && z != null && fresh(next.modifiedMs)) {
     const yaw = finite(next.yaw);
     const changed = !local || local.fileName !== next.fileName || local.at !== next.modifiedMs;
     local = { x, y, z, yaw, fileName: next.fileName, at: next.modifiedMs };
@@ -212,7 +246,8 @@ function applyShot(next: ShotState, follow: boolean) {
     if (changed || follow) void publish();
     return;
   }
-  if (local && !fresh(local.at)) local = null;
+  local = null;
+  sentSig = "";
   paint();
 }
 
@@ -263,25 +298,40 @@ function readFix(raw: Record<string, unknown>, fallbackAt = Date.now()): RemoteF
 }
 
 function takeFix(row: RemoteFix) {
+  if (membersKnown && !memberIds.has(row.userId)) return;
   if (local && row.fileName && row.fileName === local.fileName) selfId = row.userId;
   remote.set(row.userId, row);
 }
 
 function takeMembers(raw: unknown) {
   if (!Array.isArray(raw)) return;
+  membersKnown = true;
   const nextSeated = new Set<number>();
+  const nextMembers = new Set<number>();
+  const nextPeople = new Map<number, string>();
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
     const userId = Number(row.user_id || row.userId || 0);
     const name = String(row.display_name || row.displayName || row.name || "").trim();
     if (!userId) continue;
+    nextMembers.add(userId);
     if (row.in_room !== false && row.inRoom !== false) nextSeated.add(userId);
     if (!name) continue;
-    people.set(userId, name);
-    if (selfId && userId === selfId) selfName = name;
+    nextPeople.set(userId, name);
   }
-  if (nextSeated.size) seated = nextSeated;
+  memberIds = nextMembers;
+  seated = nextSeated;
+  people.clear();
+  for (const [userId, name] of nextPeople) people.set(userId, name);
+  for (const userId of remote.keys()) if (!memberIds.has(userId)) remote.delete(userId);
+  for (const userId of seenFix.keys()) if (!memberIds.has(userId)) seenFix.delete(userId);
+  pulses = pulses.filter((line) => {
+    const userId = Number(line.key.split(":", 1)[0]);
+    return memberIds.has(userId);
+  });
+  const name = selfId ? people.get(selfId) : "";
+  if (name) selfName = name;
 }
 
 async function publishPhase() {
@@ -308,17 +358,19 @@ async function publishPhase() {
 
 function onRoom(payload: Record<string, unknown>) {
   const event = String(payload.event || "");
+  const payloadRoomId = String(payload.public_id || payload.publicId || "").trim();
+  if (!activeRoomId || !payloadRoomId || payloadRoomId !== activeRoomId) return;
   if (event === "closed") {
-    roomReady = false;
-    sentSig = "";
-    phaseSig = "";
-    paint();
+    clearRoomPresenceState(false);
     return;
   }
-  const snap = payload.snapshot && typeof payload.snapshot === "object"
-    ? payload.snapshot as Record<string, unknown>
-    : null;
+  const snap =
+    payload.snapshot && typeof payload.snapshot === "object"
+      ? (payload.snapshot as Record<string, unknown>)
+      : null;
   if (snap) {
+    const nestedRoomId = String(snap.public_id || snap.publicId || "").trim();
+    if (nestedRoomId && nestedRoomId !== activeRoomId) return;
     roomReady = true;
     takeMembers(snap.members);
     if (Array.isArray(payload.player_fixes)) {
@@ -341,9 +393,43 @@ function onRoom(payload: Record<string, unknown>) {
   }
 }
 
+function clearRoomPresenceState(clearIdentity: boolean) {
+  roomReady = false;
+  if (clearIdentity) activeRoomId = "";
+  memberIds.clear();
+  membersKnown = false;
+  seated.clear();
+  people.clear();
+  remote.clear();
+  seenFix.clear();
+  pulses = [];
+  pulsePrimed = false;
+  sentSig = "";
+  phaseSig = "";
+  setPulseLines([]);
+  paint();
+}
+
+export function clearRoomPresence() {
+  clearRoomPresenceState(true);
+}
+
+export function setPlayerRoomId(roomId: string) {
+  const next = roomId.trim();
+  if (next === activeRoomId) return;
+  clearRoomPresenceState(false);
+  activeRoomId = next;
+}
+
 async function pullLogPhase() {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const snap = await invoke<{ slug?: string; phase?: string; raidId?: string; running?: boolean; ready?: boolean }>("log_state").catch(() => null);
+    const snap = await invoke<{
+      slug?: string;
+      phase?: string;
+      raidId?: string;
+      running?: boolean;
+      ready?: boolean;
+    }>("log_state").catch(() => null);
     if (!snap?.ready) {
       await new Promise((resolve) => window.setTimeout(resolve, 250));
       continue;
@@ -374,41 +460,92 @@ export function startPlayerSync() {
     paint();
     void publish();
   });
-  void listen<ShotState>("shot-fix", (event) => applyShot(event.payload, true)).catch(() => undefined);
-  void listen<Record<string, unknown>>("room-sync", (event) => onRoom(event.payload)).catch(() => undefined);
-  void listen<{ kind?: string; slug?: string; phase?: string; raidId?: string }>("log-watch", (event) => {
-    const kind = event.payload.kind || "";
-    if (kind === "map" && event.payload.slug) logSlug = event.payload.slug;
-    if (kind === "phase") {
-      phaseKind = event.payload.phase || "";
-      if (event.payload.slug) logSlug = event.payload.slug;
-      if (event.payload.raidId) raidId = event.payload.raidId;
-      void publishPhase();
-      if (phaseKind === "raid_exited" || phaseKind === "matching_aborted") logSlug = "";
-    }
-    if (kind === "raid-end") {
-      phaseKind = "raid_exited";
-      void publishPhase();
-      logSlug = "";
-    }
-    paint();
+  void listen<ShotState>("shot-fix", (event) => {
+    shotStateRead.invalidate();
+    applyShot(event.payload, true);
   }).catch(() => undefined);
-  void invoke<ShotState>("shot_state").then((snap) => applyShot(snap, false)).catch(() => undefined);
+  void listen<Record<string, unknown>>("room-sync", (event) => onRoom(event.payload)).catch(
+    () => undefined,
+  );
+  void listen("site-session-invalidated", () => clearRoomPresenceState(true)).catch(
+    () => undefined,
+  );
+  void listen<{ kind?: string; slug?: string; phase?: string; raidId?: string }>(
+    "log-watch",
+    (event) => {
+      const kind = event.payload.kind || "";
+      if (kind === "map" && event.payload.slug) logSlug = event.payload.slug;
+      if (kind === "phase") {
+        phaseKind = event.payload.phase || "";
+        if (event.payload.slug) logSlug = event.payload.slug;
+        if (event.payload.raidId) raidId = event.payload.raidId;
+        void publishPhase();
+        if (phaseKind === "raid_exited" || phaseKind === "matching_aborted") logSlug = "";
+      }
+      if (kind === "raid-end") {
+        phaseKind = "raid_exited";
+        void publishPhase();
+        logSlug = "";
+      }
+      paint();
+    },
+  ).catch(() => undefined);
   void pullLogPhase();
-  const applySettings = (row: { hotkey?: string; gameHotkey?: string; hotkeyFromGame?: boolean; syncEnabled?: boolean }) => {
-    hotkeyLabel = row.hotkeyFromGame && row.gameHotkey ? row.gameHotkey : shotHotkeyLabel(row.hotkey || "");
+  const applySettings = (row: {
+    hotkey?: string;
+    gameHotkey?: string;
+    hotkeyFromGame?: boolean;
+    syncEnabled?: boolean;
+  }) => {
+    hotkeyLabel =
+      row.hotkeyFromGame && row.gameHotkey ? row.gameHotkey : shotHotkeyLabel(row.hotkey || "");
     syncEnabled = row.syncEnabled !== false;
+    if (!syncEnabled) {
+      local = null;
+      sentSig = "";
+    }
     paint();
   };
-  void invoke<{ hotkey?: string; syncEnabled?: boolean }>("shot_settings_get").then(applySettings).catch(() => undefined);
+  const settingsRevision = shotSettingsRead.capture();
+  const shotRevision = shotStateRead.capture();
+  void (async () => {
+    const settings = await invoke<{
+      hotkey?: string;
+      gameHotkey?: string;
+      hotkeyFromGame?: boolean;
+      syncEnabled?: boolean;
+    }>("shot_settings_get").catch(() => null);
+    if (settings && shotSettingsRead.isCurrent(settingsRevision)) applySettings(settings);
+    const state = await invoke<ShotState>("shot_state").catch(() => null);
+    if (
+      state &&
+      shotSettingsRead.isCurrent(settingsRevision) &&
+      shotStateRead.isCurrent(shotRevision)
+    )
+      applyShot(state, false);
+  })();
   window.addEventListener("zhange-shot-settings", (event) => {
+    shotSettingsRead.invalidate();
     applySettings((event as CustomEvent<{ hotkey?: string; syncEnabled?: boolean }>).detail || {});
   });
-  void invoke<{ id?: number; display_name?: string; username?: string }>("site_get", { path: "/auth/me" }).then((me) => {
-    selfId = Number(me?.id || 0);
-    selfName = me?.display_name || me?.username || selfName;
-    paint();
+  void listen<{
+    hotkey?: string;
+    gameHotkey?: string;
+    hotkeyFromGame?: boolean;
+    syncEnabled?: boolean;
+  }>("shot-settings-changed", (event) => {
+    shotSettingsRead.invalidate();
+    applySettings(event.payload);
   }).catch(() => undefined);
+  void invoke<{ id?: number; display_name?: string; username?: string }>("site_get", {
+    path: "/auth/me",
+  })
+    .then((me) => {
+      selfId = Number(me?.id || 0);
+      selfName = me?.display_name || me?.username || selfName;
+      paint();
+    })
+    .catch(() => undefined);
   window.setInterval(() => {
     if (local && !fresh(local.at)) local = null;
     paint();
@@ -418,13 +555,15 @@ export function startPlayerSync() {
     const live = pulses.filter((line) => now - line.bornAt < PULSE_MS);
     if (live.length === pulses.length && !live.length) return;
     pulses = live;
-    setPulseLines(live.map((line) => ({
-      x1: line.x1,
-      z1: line.z1,
-      x2: line.x2,
-      z2: line.z2,
-      color: line.color,
-      opacity: 1 - (now - line.bornAt) / PULSE_MS,
-    })));
+    setPulseLines(
+      live.map((line) => ({
+        x1: line.x1,
+        z1: line.z1,
+        x2: line.x2,
+        z2: line.z2,
+        color: line.color,
+        opacity: 1 - (now - line.bornAt) / PULSE_MS,
+      })),
+    );
   }, 100);
 }

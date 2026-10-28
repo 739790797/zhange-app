@@ -1,5 +1,17 @@
-import { bindListSearch, listAllIcon, listBusy, listFail, listFrame, listItem, listShell, repaintList, stayOnList } from "./listFrame";
+import { invoke } from "./tauriBridge";
+import {
+  bindListSearch,
+  listAllIcon,
+  listBusy,
+  listFail,
+  listFrame,
+  listItem,
+  listShell,
+  repaintList,
+  stayOnList,
+} from "./listFrame";
 import { mapTitle } from "./mapNames";
+import { ownedKeyIds, ownedKeyIdsReady, setOwnedKeyIds } from "./keyOwnership";
 
 type KeyRow = {
   id: string;
@@ -16,24 +28,14 @@ type KeyGroup = { slug: string; name: string; keys: KeyRow[] };
 
 let seq = 0;
 let groups: KeyGroup[] = [];
-let owned = new Set<string>();
-let ownsReady = false;
-
-export async function loadOwnedKeyIds(): Promise<Set<string> | null> {
-  try {
-    const data = await invoke<{ item_ids?: string[] }>("site_get", { path: "/guides/tarkov/key-owns" });
-    owned = new Set(data.item_ids || []);
-    ownsReady = true;
-    return owned;
-  } catch {
-    return ownsReady ? owned : null;
-  }
-}
 let query = "";
 let have: "all" | "owned" | "missing" = "all";
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function rec(value: unknown): Record<string, unknown> | null {
@@ -43,12 +45,6 @@ function rec(value: unknown): Record<string, unknown> | null {
 
 function str(value: unknown) {
   return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
-}
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
 }
 
 function iconOf(icon: string, id: string) {
@@ -69,11 +65,13 @@ function detailOf(row: Record<string, unknown>) {
   if (row.access === true) parts.push("入场");
   if (row.needs_power === true) parts.push("需供电");
   const tasks = Array.isArray(row.used_in_tasks) ? row.used_in_tasks : [];
-  const names = tasks.flatMap((item) => {
-    const task = rec(item);
-    const name = str(task?.name);
-    return name ? [name] : [];
-  }).slice(0, 2);
+  const names = tasks
+    .flatMap((item) => {
+      const task = rec(item);
+      const name = str(task?.name);
+      return name ? [name] : [];
+    })
+    .slice(0, 2);
   if (names.length) parts.push(`任务：${names.join("、")}`);
   return parts.filter(Boolean).join(" · ");
 }
@@ -115,6 +113,7 @@ export function keyShell() {
 }
 
 function visible(slug: string) {
+  const owned = ownedKeyIds();
   const group = slug ? groups.find((item) => item.slug === slug) : null;
   const pool = group ? group.keys : groups.flatMap((item) => item.keys);
   const needle = query.trim().toLowerCase();
@@ -127,22 +126,29 @@ function visible(slug: string) {
 }
 
 function render(slug: string) {
+  const owned = ownedKeyIds();
+  const ownsReady = ownedKeyIdsReady();
   const current = slug ? groups.find((group) => group.slug === slug) : null;
-  const listed = groups.filter((group) => group.slug === current?.slug || visible(group.slug).length > 0);
+  const listed = groups.filter(
+    (group) => group.slug === current?.slug || visible(group.slug).length > 0,
+  );
   const side = [
     listItem("全部", !current, `href="${KEYS_HREF}" data-link`, listAllIcon()),
-    ...listed.map((group) => listItem(
-      `${esc(group.name)} ${visible(group.slug).length}`,
-      group.slug === current?.slug,
-      `href="${KEYS_HREF}/${esc(group.slug)}" data-link`,
-    )),
+    ...listed.map((group) =>
+      listItem(
+        `${esc(group.name)} ${visible(group.slug).length}`,
+        group.slug === current?.slug,
+        `href="${KEYS_HREF}/${esc(group.slug)}" data-link`,
+      ),
+    ),
   ].join("");
   const list = visible(current?.slug || "");
-  const rows = list.map((key) => {
-    const mine = owned.has(key.id);
-    const image = key.icon ? `<img src="${esc(key.icon)}" alt="" />` : "<i></i>";
-    const label = key.short && key.short !== key.name ? key.short : key.name;
-    return `<tr>
+  const rows = list
+    .map((key) => {
+      const mine = owned.has(key.id);
+      const image = key.icon ? `<img src="${esc(key.icon)}" alt="" />` : "<i></i>";
+      const label = key.short && key.short !== key.name ? key.short : key.name;
+      return `<tr>
       <td><button type="button" class="tarkov-list-name" data-wiki="item" data-wiki-id="${esc(key.id)}" title="${esc(key.name)}">${image}<span>${esc(label)}</span></button></td>
       <td>${esc(key.map || "—")}</td>
       <td class="num">${esc(key.uses || "—")}</td>
@@ -150,7 +156,8 @@ function render(slug: string) {
       <td class="key-note" title="${esc(key.detail)}">${esc(key.detail || "—")}</td>
       <td><button type="button" class="key-own${mine ? " on" : ""}" data-key-own="${esc(key.id)}" ${ownsReady ? "" : "disabled"}>${ownsReady ? (mine ? "已拥有" : "未拥有") : "未读取"}</button></td>
     </tr>`;
-  }).join("");
+    })
+    .join("");
   const filters = `<div class="tarkov-list-kinds">
     <button type="button" data-key-have="all" class="${have === "all" ? "on" : ""}">全部</button>
     <button type="button" data-key-have="owned" class="${have === "owned" ? "on" : ""}">已拥有</button>
@@ -163,28 +170,34 @@ function render(slug: string) {
     side,
     meta: `共 ${list.length} 把${current ? ` · ${esc(current.name)}` : ""}`,
     filters,
-    search: { id: "key-find", value: query, placeholder: "搜索钥匙、任务或用途", label: "搜索钥匙" },
+    search: {
+      id: "key-find",
+      value: query,
+      placeholder: "搜索钥匙、任务或用途",
+      label: "搜索钥匙",
+    },
     panel,
   });
 }
 
 async function toggle(id: string, slug: string) {
-  if (!ownsReady) return;
+  if (!ownedKeyIdsReady()) return;
+  const owned = ownedKeyIds();
   const next = new Set(owned);
   if (next.has(id)) next.delete(id);
   else next.add(id);
   const previous = owned;
-  owned = next;
+  setOwnedKeyIds(next);
   paint(slug);
   try {
     const data = await invoke<{ item_ids?: string[] }>("site_put", {
       path: "/guides/tarkov/key-owns",
-      body: { item_ids: [...owned] },
+      body: { item_ids: [...ownedKeyIds()] },
     });
-    if (Array.isArray(data.item_ids)) owned = new Set(data.item_ids);
+    if (Array.isArray(data.item_ids)) setOwnedKeyIds(data.item_ids);
     paint(slug);
   } catch (error) {
-    owned = previous;
+    setOwnedKeyIds(previous);
     paint(slug);
     const live = document.querySelector(".tarkov-list-main");
     if (!live) return;
@@ -235,16 +248,19 @@ export async function mountKeys(slug: string) {
   listBusy(host, "正在读取钥匙");
   try {
     const [packs, owns] = await Promise.all([
-      invoke<{ maps?: Record<string, unknown>[]; unbound?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/key-packs" }),
-      invoke<{ item_ids?: string[] }>("site_get", { path: "/guides/tarkov/key-owns" }).then((data) => {
-        owned = new Set(data.item_ids || []);
-        ownsReady = true;
-        return data;
-      }).catch(() => {
-        ownsReady = false;
-        owned = new Set();
-        return { item_ids: [] as string[] };
-      }),
+      invoke<{ maps?: Record<string, unknown>[]; unbound?: Record<string, unknown>[] }>(
+        "site_get",
+        { path: "/guides/tarkov/key-packs" },
+      ),
+      invoke<{ item_ids?: string[] }>("site_get", { path: "/guides/tarkov/key-owns" })
+        .then((data) => {
+          setOwnedKeyIds(data.item_ids || []);
+          return data;
+        })
+        .catch(() => {
+          setOwnedKeyIds([], false);
+          return { item_ids: [] as string[] };
+        }),
     ]);
     if (token !== seq || !document.querySelector("#keys")) return;
     groups = (packs.maps || []).flatMap((item) => {
@@ -259,7 +275,7 @@ export async function mountKeys(slug: string) {
       return key ? [key] : [];
     });
     if (loose.length) groups.push({ slug: "unbound", name: "未归类", keys: loose });
-    owned = new Set(owns.item_ids || []);
+    setOwnedKeyIds(owns.item_ids || []);
     paint(groups.some((item) => item.slug === slug) ? slug : "");
   } catch (error) {
     if (token !== seq) return;

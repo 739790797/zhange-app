@@ -10,16 +10,15 @@ fn main() {
     let windows = tauri_build::WindowsAttributes::new().app_manifest(manifest);
     let attrs = tauri_build::Attributes::new()
         .windows_attributes(windows)
-        .app_manifest(
-        tauri_build::AppManifest::new().commands(&[
+        .app_manifest(tauri_build::AppManifest::new().commands(&[
             "site_login",
             "site_logout",
             "site_session",
             "site_get",
             "site_post",
-    "site_put",
-    "site_patch",
-    "site_delete",
+            "site_put",
+            "site_patch",
+            "site_delete",
             "site_set_game_mode",
             "room_watch",
             "room_unwatch",
@@ -49,8 +48,7 @@ fn main() {
             "overlay_return_focus",
             "log_state",
             "log_tails",
-        ]),
-    );
+        ]));
     if let Err(error) = tauri_build::try_build(attrs) {
         println!("{error:#}");
         std::process::exit(1);

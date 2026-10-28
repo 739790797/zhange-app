@@ -1,8 +1,21 @@
+import { invoke } from "./tauriBridge";
 import { emit, listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { adoptAccount, type AccountMapFilters } from "./mapFilterAccount";
-import { destroyLiveMap, fitLiveMap, invalidateLiveMap, liveMapCamera, mountLiveMap, replacePrefs, setLiveMapCamera, snapshotAccount, snapshotPrefs, watchLiveMapCamera, type FilterPrefs } from "./liveMap";
+import {
+  destroyLiveMap,
+  fitLiveMap,
+  invalidateLiveMap,
+  liveMapCamera,
+  mountLiveMap,
+  replacePrefs,
+  setLiveMapCamera,
+  snapshotAccount,
+  snapshotPrefs,
+  watchLiveMapCamera,
+  type FilterPrefs,
+} from "./liveMap";
 import { fadeIn, fadeOut } from "./motion";
 
 export type OverlayState = {
@@ -32,12 +45,10 @@ const VIEW_KEY = "zhange.overlay.views";
 let overlayState: OverlayState | null = null;
 let recording = false;
 let mountedSlug = "";
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
+let mapMountGeneration = 0;
+let overlayRevision = 0;
+let overlaySavePending = 0;
+let overlaySaveQueue: Promise<void> = Promise.resolve();
 
 export function overlayView(): "overlay" | "" {
   const view = new URLSearchParams(location.search).get("view");
@@ -82,7 +93,11 @@ export async function ensureOverlayState() {
 export async function publishOverlayMap(slug: string) {
   if (!slug || overlayView()) return;
   await invoke("overlay_note_map", { slug }).catch(() => undefined);
-  await emit("overlay-sync", { slug, prefs: snapshotPrefs(), account: snapshotAccount() } satisfies SyncPayload);
+  await emit("overlay-sync", {
+    slug,
+    prefs: snapshotPrefs(),
+    account: snapshotAccount(),
+  } satisfies SyncPayload);
 }
 
 export function bootOverlayShell() {
@@ -149,10 +164,7 @@ export function onOverlayClick(target: Element) {
     return true;
   }
   if (action?.dataset.overlay === "reset") {
-    void invoke<OverlayState>("overlay_reset").then((state) => {
-      overlayState = state;
-      paintOverlayDialog(state);
-    });
+    void resetOverlay();
     return true;
   }
   return false;
@@ -171,7 +183,8 @@ export function onOverlayInput(target: EventTarget | null) {
 }
 
 export function onOverlayChange(target: EventTarget | null) {
-  if (!(target instanceof HTMLInputElement) || !overlayState || target.type !== "checkbox") return false;
+  if (!(target instanceof HTMLInputElement) || !overlayState || target.type !== "checkbox")
+    return false;
   const key = target.dataset.overlay;
   if (key === "autoFocus") overlayState.autoFocus = target.checked;
   else if (key === "lockAspect") overlayState.lockAspect = target.checked;
@@ -199,15 +212,23 @@ export function onOverlayKey(event: KeyboardEvent) {
 export function watchOverlayTyping() {
   const sync = () => {
     if (recording) return;
-    void invoke("overlay_set_guard", { capturing: false, typing: typingActive() }).catch(() => undefined);
+    void invoke("overlay_set_guard", { capturing: false, typing: typingActive() }).catch(
+      () => undefined,
+    );
   };
   document.addEventListener("focusin", sync);
   document.addEventListener("focusout", sync);
   void listen<OverlayState>("overlay-changed", (event) => {
-    overlayState = event.payload;
-    if (document.querySelector("#overlay-menu") && !document.querySelector("#overlay-settings-modal")?.hasAttribute("hidden")) {
-      paintOverlayDialog(event.payload);
+    acceptOverlayState(event.payload);
+    if (
+      document.querySelector("#overlay-menu") &&
+      !document.querySelector("#overlay-settings-modal")?.hasAttribute("hidden")
+    ) {
+      if (overlayState) paintOverlayDialog(overlayState);
     }
+  }).catch(() => undefined);
+  void listen<string>("overlay-persistence-error", (event) => {
+    showOverlaySaveNote(event.payload || "覆盖层位置保存失败");
   }).catch(() => undefined);
   void listen("overlay-shown", () => {
     const slug = document.querySelector("#map-root")?.getAttribute("data-slug") || "";
@@ -235,15 +256,98 @@ function paintOverlayDialog(state: OverlayState) {
   if (opacity) opacity.value = String(state.opacity);
   const label = menu.querySelector("[data-opacity-label]");
   if (label) label.textContent = `${state.opacity}%`;
-  const shape = menu.querySelector("[data-overlay=\"shape\"]");
+  const shape = menu.querySelector('[data-overlay="shape"]');
   if (shape) shape.textContent = state.shape === "circle" ? "形状切换：圆形" : "形状切换：矩形";
   const button = menu.querySelector("#overlay-hotkey");
   if (button) button.textContent = recording ? "请按键" : state.hotkey || "M";
 }
 
 async function persistOverlay(state: OverlayState) {
-  overlayState = await invoke<OverlayState>("overlay_save", { state });
-  paintOverlayDialog(overlayState);
+  const revision = ++overlayRevision;
+  const snapshot = { ...state };
+  overlaySavePending += 1;
+  const operation = overlaySaveQueue
+    .then(async () => {
+      if (revision !== overlayRevision) return;
+      try {
+        const saved = await invoke<OverlayState>("overlay_save", { state: snapshot });
+        if (revision !== overlayRevision) return;
+        overlayState = saved;
+        clearOverlaySaveNote();
+        paintOverlayDialog(saved);
+      } catch (error) {
+        if (revision !== overlayRevision) return;
+        const saved = await invoke<OverlayState>("overlay_get").catch(() => null);
+        if (saved) overlayState = saved;
+        showOverlaySaveNote(error instanceof Error ? error.message : "覆盖层设置保存失败");
+        if (overlayState) paintOverlayDialog(overlayState);
+      }
+    })
+    .finally(() => {
+      overlaySavePending = Math.max(0, overlaySavePending - 1);
+    });
+  overlaySaveQueue = operation.then(() => undefined);
+  return operation;
+}
+
+function acceptOverlayState(next: OverlayState) {
+  if (!overlaySavePending || !overlayState) {
+    overlayState = next;
+    return;
+  }
+  overlayState = {
+    ...next,
+    ...overlayState,
+    x: next.x,
+    y: next.y,
+    width: next.width,
+    height: next.height,
+    aspect: next.aspect,
+    placed: next.placed,
+    mapSlug: next.mapSlug,
+    visible: next.visible,
+  };
+}
+
+async function resetOverlay() {
+  const revision = ++overlayRevision;
+  overlaySavePending += 1;
+  const operation = overlaySaveQueue
+    .then(async () => {
+      if (revision !== overlayRevision) return;
+      try {
+        const saved = await invoke<OverlayState>("overlay_reset");
+        if (revision !== overlayRevision) return;
+        overlayState = saved;
+        clearOverlaySaveNote();
+        paintOverlayDialog(saved);
+      } catch (error) {
+        if (revision !== overlayRevision) return;
+        showOverlaySaveNote(error instanceof Error ? error.message : "覆盖层重置失败");
+      }
+    })
+    .finally(() => {
+      overlaySavePending = Math.max(0, overlaySavePending - 1);
+    });
+  overlaySaveQueue = operation.then(() => undefined);
+  return operation;
+}
+
+function showOverlaySaveNote(message: string) {
+  const menu = document.querySelector<HTMLElement>("#overlay-menu");
+  if (!menu) return;
+  let note = menu.querySelector<HTMLElement>("#overlay-save-note");
+  if (!note) {
+    note = document.createElement("p");
+    note.id = "overlay-save-note";
+    note.setAttribute("role", "status");
+    menu.append(note);
+  }
+  note.textContent = message;
+}
+
+function clearOverlaySaveNote() {
+  document.querySelector("#overlay-save-note")?.remove();
 }
 
 function typingActive() {
@@ -255,7 +359,10 @@ function typingActive() {
 
 function savedViews(): Record<string, { lat: number; lng: number; zoom: number }> {
   try {
-    return JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") as Record<string, { lat: number; lng: number; zoom: number }>;
+    return JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") as Record<
+      string,
+      { lat: number; lng: number; zoom: number }
+    >;
   } catch {
     return {};
   }
@@ -283,7 +390,15 @@ async function bootMapOverlay() {
     if (event.target instanceof Element && event.target.closest("#overlay-menu")) return;
     closeOverlaySettings();
   });
-  let rightDrag: { x: number; y: number; winX: number; winY: number; scale: number; moved: boolean; ready: boolean } | null = null;
+  let rightDrag: {
+    x: number;
+    y: number;
+    winX: number;
+    winY: number;
+    scale: number;
+    moved: boolean;
+    ready: boolean;
+  } | null = null;
   let dragPoint: { x: number; y: number } | null = null;
   let dragFrame = 0;
   let dragSending = false;
@@ -297,65 +412,93 @@ async function bootMapOverlay() {
       return;
     }
     dragSending = true;
-    void getCurrentWindow().setPosition(new PhysicalPosition(point.x, point.y)).finally(() => {
-      dragSending = false;
-      if (!dragAgain) return;
-      dragAgain = false;
-      if (!dragPoint || (dragPoint.x === point.x && dragPoint.y === point.y)) return;
-      dragFrame = window.requestAnimationFrame(flushOverlayDrag);
-    });
+    void getCurrentWindow()
+      .setPosition(new PhysicalPosition(point.x, point.y))
+      .finally(() => {
+        dragSending = false;
+        if (!dragAgain) return;
+        dragAgain = false;
+        if (!dragPoint || (dragPoint.x === point.x && dragPoint.y === point.y)) return;
+        dragFrame = window.requestAnimationFrame(flushOverlayDrag);
+      });
   };
-  document.addEventListener("pointerdown", (event) => {
-    if (!(event instanceof PointerEvent) || event.button !== 2) return;
-    if (event.target instanceof Element && event.target.closest("#overlay-menu")) return;
-    const target = event.target;
-    const originX = event.screenX;
-    const originY = event.screenY;
-    dragPoint = null;
-    dragAgain = false;
-    rightDrag = { x: originX, y: originY, winX: 0, winY: 0, scale: window.devicePixelRatio || 1, moved: false, ready: false };
-    if (target instanceof Element) target.setPointerCapture?.(event.pointerId);
-    void getCurrentWindow().outerPosition().then(async (pos) => {
-      if (!rightDrag || rightDrag.x !== originX || rightDrag.y !== originY) return;
-      rightDrag.winX = pos.x;
-      rightDrag.winY = pos.y;
-      rightDrag.scale = await getCurrentWindow().scaleFactor();
-      rightDrag.ready = true;
-    });
-  }, true);
-  document.addEventListener("pointermove", (event) => {
-    if (!rightDrag || !(event instanceof PointerEvent) || (event.buttons & 2) === 0) return;
-    const dx = event.screenX - rightDrag.x;
-    const dy = event.screenY - rightDrag.y;
-    if (Math.hypot(dx, dy) > 4) rightDrag.moved = true;
-    if (!rightDrag.ready || !rightDrag.moved) return;
-    dragPoint = {
-      x: Math.round(rightDrag.winX + dx * rightDrag.scale),
-      y: Math.round(rightDrag.winY + dy * rightDrag.scale),
-    };
-    if (!dragFrame) dragFrame = window.requestAnimationFrame(flushOverlayDrag);
-  }, true);
-  document.addEventListener("pointerup", (event) => {
-    const dragging = Boolean(rightDrag?.moved);
-    if (dragFrame) {
-      window.cancelAnimationFrame(dragFrame);
-      dragFrame = 0;
-    }
-    if (dragging) flushOverlayDrag();
-    if (!(event instanceof PointerEvent) || event.button !== 2 || !dragging) return;
-    window.setTimeout(() => {
-      rightDrag = null;
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!(event instanceof PointerEvent) || event.button !== 2) return;
+      if (event.target instanceof Element && event.target.closest("#overlay-menu")) return;
+      const target = event.target;
+      const originX = event.screenX;
+      const originY = event.screenY;
       dragPoint = null;
-    }, 0);
-  }, true);
-  document.addEventListener("contextmenu", (event) => {
-    event.preventDefault();
-    const dragged = rightDrag?.moved;
-    if (!dragged) rightDrag = null;
-    if (dragged) return;
-    if (event.target instanceof Element && event.target.closest("#overlay-menu")) return;
-    void openOverlaySettings({ x: event.clientX, y: event.clientY });
-  }, true);
+      dragAgain = false;
+      rightDrag = {
+        x: originX,
+        y: originY,
+        winX: 0,
+        winY: 0,
+        scale: window.devicePixelRatio || 1,
+        moved: false,
+        ready: false,
+      };
+      if (target instanceof Element) target.setPointerCapture?.(event.pointerId);
+      void getCurrentWindow()
+        .outerPosition()
+        .then(async (pos) => {
+          if (!rightDrag || rightDrag.x !== originX || rightDrag.y !== originY) return;
+          rightDrag.winX = pos.x;
+          rightDrag.winY = pos.y;
+          rightDrag.scale = await getCurrentWindow().scaleFactor();
+          rightDrag.ready = true;
+        });
+    },
+    true,
+  );
+  document.addEventListener(
+    "pointermove",
+    (event) => {
+      if (!rightDrag || !(event instanceof PointerEvent) || (event.buttons & 2) === 0) return;
+      const dx = event.screenX - rightDrag.x;
+      const dy = event.screenY - rightDrag.y;
+      if (Math.hypot(dx, dy) > 4) rightDrag.moved = true;
+      if (!rightDrag.ready || !rightDrag.moved) return;
+      dragPoint = {
+        x: Math.round(rightDrag.winX + dx * rightDrag.scale),
+        y: Math.round(rightDrag.winY + dy * rightDrag.scale),
+      };
+      if (!dragFrame) dragFrame = window.requestAnimationFrame(flushOverlayDrag);
+    },
+    true,
+  );
+  document.addEventListener(
+    "pointerup",
+    (event) => {
+      const dragging = Boolean(rightDrag?.moved);
+      if (dragFrame) {
+        window.cancelAnimationFrame(dragFrame);
+        dragFrame = 0;
+      }
+      if (dragging) flushOverlayDrag();
+      if (!(event instanceof PointerEvent) || event.button !== 2 || !dragging) return;
+      window.setTimeout(() => {
+        rightDrag = null;
+        dragPoint = null;
+      }, 0);
+    },
+    true,
+  );
+  document.addEventListener(
+    "contextmenu",
+    (event) => {
+      event.preventDefault();
+      const dragged = rightDrag?.moved;
+      if (!dragged) rightDrag = null;
+      if (dragged) return;
+      if (event.target instanceof Element && event.target.closest("#overlay-menu")) return;
+      void openOverlaySettings({ x: event.clientX, y: event.clientY });
+    },
+    true,
+  );
   document.addEventListener("mouseleave", () => {
     void invoke("overlay_return_focus").catch(() => undefined);
   });
@@ -371,10 +514,11 @@ async function bootMapOverlay() {
   overlayState = await invoke<OverlayState>("overlay_get").catch(() => null);
   if (overlayState) applyChrome(overlayState);
   void listen<OverlayState>("overlay-changed", (event) => {
-    overlayState = event.payload;
-    applyChrome(event.payload);
+    acceptOverlayState(event.payload);
+    const state = overlayState || event.payload;
+    applyChrome(state);
     const modal = document.querySelector("#overlay-settings-modal");
-    if (modal && !modal.hasAttribute("hidden")) paintOverlayDialog(event.payload);
+    if (modal && !modal.hasAttribute("hidden")) paintOverlayDialog(state);
   });
   void listen<SyncPayload>("overlay-sync", (event) => {
     if (event.payload.account) adoptAccount(event.payload.account);
@@ -387,9 +531,15 @@ async function showMap(slug: string, prefs: FilterPrefs | null) {
   const empty = document.querySelector<HTMLElement>("#overlay-empty");
   const host = document.querySelector<HTMLElement>("#map-root");
   if (!slug || !host) {
+    mapMountGeneration += 1;
+    if (mountedSlug) {
+      mountedSlug = "";
+      destroyLiveMap();
+    }
     if (empty) empty.hidden = false;
     return;
   }
+  const generation = mountedSlug === slug ? mapMountGeneration : ++mapMountGeneration;
   if (empty) empty.hidden = true;
   if (prefs) replacePrefs(prefs);
   if (mountedSlug !== slug) {
@@ -397,14 +547,18 @@ async function showMap(slug: string, prefs: FilterPrefs | null) {
     host.setAttribute("data-slug", slug);
     destroyLiveMap();
     await mountLiveMap(slug, false);
+    if (generation !== mapMountGeneration || mountedSlug !== slug) return;
     const saved = savedViews()[slug];
     if (saved) setLiveMapCamera(saved.lat, saved.lng, saved.zoom);
     else fitLiveMap();
     requestAnimationFrame(() => {
+      if (generation !== mapMountGeneration || mountedSlug !== slug) return;
       invalidateLiveMap();
       if (!savedViews()[slug]) fitLiveMap();
     });
-    watchLiveMapCamera(() => rememberView(slug));
+    watchLiveMapCamera(() => {
+      if (generation === mapMountGeneration && mountedSlug === slug) rememberView(slug);
+    });
     return;
   }
   if (prefs) replacePrefs(prefs);

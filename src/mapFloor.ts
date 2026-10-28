@@ -46,7 +46,8 @@ function spanOf(row: HeightPoint): Span | null {
 }
 
 function parseHeight(height?: number[]): Span | null {
-  if (!height || height.length < 2 || !Number.isFinite(height[0]) || !Number.isFinite(height[1])) return null;
+  if (!height || height.length < 2 || !Number.isFinite(height[0]) || !Number.isFinite(height[1]))
+    return null;
   return { min: Math.min(height[0], height[1]), max: Math.max(height[0], height[1]) };
 }
 
@@ -63,7 +64,12 @@ function parseBounds(raw: unknown): Bounds[] | undefined {
     const x2 = Number(b[0]);
     const z2 = Number(b[1]);
     if (![x1, z1, x2, z2].every(Number.isFinite)) continue;
-    out.push({ minX: Math.min(x1, x2), maxX: Math.max(x1, x2), minZ: Math.min(z1, z2), maxZ: Math.max(z1, z2) });
+    out.push({
+      minX: Math.min(x1, x2),
+      maxX: Math.max(x1, x2),
+      minZ: Math.min(z1, z2),
+      maxZ: Math.max(z1, z2),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -91,7 +97,9 @@ function matches(band: FloorBand, span: Span, at?: At | null) {
 }
 
 function contains(band: FloorBand, span: Span, at?: At | null) {
-  return extentsOf(band).some((extent) => extent.min <= span.min && span.max <= extent.max && boundsOk(extent, at));
+  return extentsOf(band).some(
+    (extent) => extent.min <= span.min && span.max <= extent.max && boundsOk(extent, at),
+  );
 }
 
 function duplicatesGround(band: FloorBand, ground: FloorBand) {
@@ -128,12 +136,19 @@ export function markerFloorBands(layer: FloorLayer | null | undefined): FloorBan
       extents,
     });
   }
-  const key = String(layer.normalizedName || layer.key || "").trim().toLowerCase();
+  const key = String(layer.normalizedName || layer.key || "")
+    .trim()
+    .toLowerCase();
   if (!STREETS.has(key)) return bands;
   return bands.map((band) => {
     const height = STORY[band.name];
     if (!height) return band;
-    return { ...band, min: height.min, max: height.max, extents: [{ min: height.min, max: height.max }] };
+    return {
+      ...band,
+      min: height.min,
+      max: height.max,
+      extents: [{ min: height.min, max: height.max }],
+    };
   });
 }
 
@@ -142,7 +157,13 @@ export function spanOnFloor(span: Span | null, floor: string, bands: FloorBand[]
   if (!floor) {
     if (!span) return true;
     const ground = bands.find((band) => !band.name);
-    if (bands.some((band) => band.name && !(ground && duplicatesGround(band, ground)) && contains(band, span, at))) return false;
+    if (
+      bands.some(
+        (band) =>
+          band.name && !(ground && duplicatesGround(band, ground)) && contains(band, span, at),
+      )
+    )
+      return false;
     if (!ground) return true;
     return matches(ground, span, at);
   }
@@ -181,7 +202,9 @@ export function floorForSpan(span: Span | null, bands: FloorBand[], at?: At | nu
   if (!bands.length || !span) return "";
   const mid = (span.min + span.max) / 2;
   const contained = bands.filter((band) => band.name && contains(band, span, at));
-  const pool = contained.length ? contained : bands.filter((band) => overlapLen(band, span, at) != null);
+  const pool = contained.length
+    ? contained
+    : bands.filter((band) => overlapLen(band, span, at) != null);
   if (pool.length) {
     let best = pool[0];
     let bestOverlap = overlapLen(best, span, at) ?? 0;

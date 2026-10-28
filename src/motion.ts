@@ -6,7 +6,10 @@ function reduced() {
 }
 
 export function fadeIn(node: HTMLElement) {
-  const visible = !node.hidden && node.classList.contains("is-fade-in") && !node.classList.contains("is-fade-out");
+  const visible =
+    !node.hidden &&
+    node.classList.contains("is-fade-in") &&
+    !node.classList.contains("is-fade-out");
   node.hidden = false;
   node.classList.remove("is-fade-out");
   pending.delete(node);

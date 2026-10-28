@@ -1,5 +1,20 @@
+import { invoke } from "./tauriBridge";
 import { fadeIn, fadeOut } from "./motion";
 import { noteTaskSynced, reloadTaskProgress } from "./taskFlow";
+import { reloadMapTaskProgress } from "./mapTasks";
+import {
+  cloneTaskProgress,
+  readTaskProgress,
+  serializeTaskProgress,
+  taskProgressPath,
+  withTaskGameMode,
+  type TaskGameMode,
+} from "./taskProgressQueue";
+import {
+  currentTaskProgressAccountEpoch,
+  taskProgressAccountEpochIsCurrent,
+} from "./taskProgressQueue";
+import { commitLogSyncProgress, indexLogSyncCatalog } from "./logSyncProgress";
 
 type Session = { folder: string; startedAt: string };
 type Bundle = { folder: string; files: { name: string; text: string }[] };
@@ -15,18 +30,12 @@ let preset: "all" | "wipe" | "7d" | "30d" = "all";
 let busy = false;
 let cancel = false;
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
-
 function note(text: string) {
   const node = document.querySelector("#path-note");
   if (node) node.textContent = text;
 }
 
-function gameMode(): "pvp" | "pve" {
+function gameMode(): TaskGameMode {
   return localStorage.getItem("zhange.guides.tarkov.gameMode") === "pve" ? "pve" : "pvp";
 }
 
@@ -44,9 +53,10 @@ function dayStart(daysAgo: number) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} 00:00:00`;
 }
 
-function inRange(startedAt: string) {
-  if (!startedAt || preset === "all") return true;
-  const from = preset === "wipe" ? WIPE_START : preset === "7d" ? dayStart(7) : dayStart(30);
+function inRange(startedAt: string, selectedRange = preset) {
+  if (!startedAt || selectedRange === "all") return true;
+  const from =
+    selectedRange === "wipe" ? WIPE_START : selectedRange === "7d" ? dayStart(7) : dayStart(30);
   return startedAt >= from;
 }
 
@@ -66,10 +76,10 @@ function extractJson(block: string) {
     if (inStr) {
       if (esc) esc = false;
       else if (ch === "\\") esc = true;
-      else if (ch === "\"") inStr = false;
+      else if (ch === '"') inStr = false;
       continue;
     }
-    if (ch === "\"") inStr = true;
+    if (ch === '"') inStr = true;
     else if (ch === "{") depth += 1;
     else if (ch === "}") {
       depth -= 1;
@@ -79,7 +89,11 @@ function extractJson(block: string) {
   return "";
 }
 
-function parseQuests(text: string, inheritedMode = ""): { events: QuestEvent[]; sessionMode: string } {
+function parseQuests(
+  text: string,
+  inheritedMode = "",
+  selectedMode = gameMode(),
+): { events: QuestEvent[]; sessionMode: string } {
   const source = text.replace(/\r\n/g, "\n");
   const lines = source.split("\n");
   const events: QuestEvent[] = [];
@@ -103,7 +117,11 @@ function parseQuests(text: string, inheritedMode = ""): { events: QuestEvent[]; 
       const message = parsed.message || (parsed as Record<string, unknown>);
       const type = Number(message.type ?? message.Type ?? message.status ?? message.Status);
       const kind = KIND_BY_TYPE[type];
-      const id = taskId(String(message.templateId || message.TemplateId || message.questId || message.QuestId || ""));
+      const id = taskId(
+        String(
+          message.templateId || message.TemplateId || message.questId || message.QuestId || "",
+        ),
+      );
       const at = /^\d{4}-\d{2}-\d{2}/.exec(line)?.[0] ? line.slice(0, 19) : "";
       if (kind && id) events.push({ kind, at, taskId: id, sessionMode });
     } catch {
@@ -111,7 +129,7 @@ function parseQuests(text: string, inheritedMode = ""): { events: QuestEvent[]; 
     }
   }
   return {
-    events: events.filter((event) => modeKind(event.sessionMode) === gameMode()),
+    events: events.filter((event) => modeKind(event.sessionMode) === selectedMode),
     sessionMode,
   };
 }
@@ -134,12 +152,20 @@ function fold(events: QuestEvent[]) {
   return next;
 }
 
-function ids(value: unknown) {
-  return Array.isArray(value) ? value.map(String) : [];
+function stopForCancelOrAccountChange(accountEpoch: number) {
+  if (taskProgressAccountEpochIsCurrent(accountEpoch) && cancel) {
+    note("已取消，未提交变更。");
+    return true;
+  }
+  return !taskProgressAccountEpochIsCurrent(accountEpoch);
 }
 
 export function logSyncBusy() {
   return busy;
+}
+
+export function cancelLogSyncForAccountChange() {
+  if (busy) cancel = true;
 }
 
 export function openLogSync() {
@@ -169,93 +195,121 @@ export async function runLogSync() {
   }
   busy = true;
   cancel = false;
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  const isCurrent = () => !cancel && taskProgressAccountEpochIsCurrent(accountEpoch);
+  const selectedMode = gameMode();
+  const selectedRange = preset;
   const button = document.querySelector("#log-sync");
   if (button) button.textContent = "取消同步";
   try {
-    const sessions = (await invoke<Session[]>("logs_list")).filter((item) => inRange(item.startedAt));
+    const sessions = (await invoke<Session[]>("logs_list")).filter((item) =>
+      inRange(item.startedAt, selectedRange),
+    );
+    if (stopForCancelOrAccountChange(accountEpoch)) return;
     if (!sessions.length) {
       note("这个范围内没有启动记录。");
       return;
     }
-    const catalog = await invoke<{ items?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/tasks?layout=all" }).catch(() => ({ items: [] }));
-    const names = new Map<string, string>();
-    const prereq = new Map<string, string[]>();
-    const mutex = new Map<string, string[]>();
-    for (const item of catalog.items || []) {
-      const id = String(item.id || "").toLowerCase();
-      if (!id) continue;
-      names.set(id, String(item.name || id));
-      prereq.set(id, ids(item.prereq_ids || item.prereqIds).map((value) => value.toLowerCase()));
-      mutex.set(id, ids(item.mutex_ids || item.mutexIds).map((value) => value.toLowerCase()));
+    const catalogResponse = await invoke<unknown>("site_get", {
+      path: withTaskGameMode("/guides/tarkov/tasks?layout=all", selectedMode),
+    });
+    if (stopForCancelOrAccountChange(accountEpoch)) return;
+    const catalog = indexLogSyncCatalog(catalogResponse);
+    if (!catalog) {
+      throw new Error("无法读取任务目录，日志同步已停止；请检查网络后重试。");
     }
-    const progress = await invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" });
-    const done = new Set(ids(progress.task_ids || progress.taskIds).map((id) => id.toLowerCase()));
-    const started = new Set(ids(progress.started_ids || progress.startedIds).map((id) => id.toLowerCase()));
-    const failed = new Set(ids(progress.failed_ids || progress.failedIds).map((id) => id.toLowerCase()));
-    const before = { done: done.size, started: started.size, failed: failed.size };
+    const { names, prereq, mutex } = catalog;
+    const baseProgress = await serializeTaskProgress(async () => {
+      if (!isCurrent()) return null;
+      const progress = await invoke<Record<string, unknown>>("site_get", {
+        path: taskProgressPath(selectedMode),
+      });
+      if (!isCurrent()) return null;
+      return readTaskProgress(progress);
+    });
+    if (stopForCancelOrAccountChange(accountEpoch) || !baseProgress) return;
+    const proposed = cloneTaskProgress(baseProgress);
     const events: QuestEvent[] = [];
     const oldest = [...sessions].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
     for (let index = 0; index < oldest.length; index += 4) {
-      if (cancel) break;
+      if (stopForCancelOrAccountChange(accountEpoch)) return;
       note(`正在解析 ${Math.min(index + 4, oldest.length)} / ${oldest.length}`);
       const chunk = oldest.slice(index, index + 4).map((item) => item.folder);
       const bundles = await invoke<Bundle[]>("logs_read", { folders: chunk });
+      if (stopForCancelOrAccountChange(accountEpoch)) return;
       for (const bundle of bundles) {
         let sessionMode = "";
         for (const file of bundle.files) {
-          const parsed = parseQuests(file.text, sessionMode);
+          const parsed = parseQuests(file.text, sessionMode, selectedMode);
           sessionMode = parsed.sessionMode || sessionMode;
           events.push(...parsed.events);
         }
       }
     }
+    if (stopForCancelOrAccountChange(accountEpoch)) return;
     const folded = fold(events);
     const markDone = (id: string, seen = new Set<string>()) => {
-      if (!id || seen.has(id)) return;
+      if (!id || !names.has(id) || seen.has(id)) return;
       seen.add(id);
-      done.add(id);
-      started.delete(id);
-      failed.delete(id);
+      proposed.done.add(id);
+      proposed.started.delete(id);
+      proposed.failed.delete(id);
       for (const other of mutex.get(id) || []) {
-        if (!done.has(other)) {
-          failed.add(other);
-          started.delete(other);
+        if (names.has(other) && !proposed.done.has(other)) {
+          proposed.failed.add(other);
+          proposed.started.delete(other);
         }
       }
       for (const parent of prereq.get(id) || []) markDone(parent, seen);
     };
     for (const [id, state] of folded) {
-      if (names.size && !names.has(id)) continue;
+      if (!names.has(id)) continue;
       if (state.everCompleted) markDone(id);
       else if (state.kind === "failed") {
-        failed.add(id);
-        started.delete(id);
+        proposed.failed.add(id);
+        proposed.started.delete(id);
       } else {
-        if (!done.has(id)) started.add(id);
-        failed.delete(id);
+        if (!proposed.done.has(id)) proposed.started.add(id);
+        proposed.failed.delete(id);
       }
     }
-    for (const id of done) {
-      started.delete(id);
-      failed.delete(id);
+    for (const id of new Set([...proposed.done, ...proposed.started, ...proposed.failed])) {
+      if (proposed.done.has(id)) {
+        proposed.started.delete(id);
+        proposed.failed.delete(id);
+      } else if (proposed.failed.has(id)) {
+        proposed.started.delete(id);
+      }
     }
-    await invoke("site_put", {
-      path: "/guides/tarkov/task-dones",
-      body: {
-        task_ids: [...done],
-        started_ids: [...started],
-        failed_ids: [...failed],
-        objective_dones: Array.isArray(progress.objective_dones) ? progress.objective_dones : [],
-        replace: true,
-      },
+    const result = await commitLogSyncProgress(baseProgress, proposed, {
+      isCurrent,
+      readLatest: () =>
+        invoke<Record<string, unknown>>("site_get", { path: taskProgressPath(selectedMode) }),
+      writeProgress: (body) => invoke("site_put", { path: taskProgressPath(selectedMode), body }),
     });
+    if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return;
+    if (cancel || result.cancelled) {
+      note(
+        result.wrote
+          ? "取消请求到达前，同步请求已提交；未标记为完整同步。"
+          : "已取消，未提交变更。",
+      );
+      if (result.wrote) {
+        await Promise.all([reloadTaskProgress(selectedMode), reloadMapTaskProgress(selectedMode)]);
+      }
+      return;
+    }
     const sign = (value: number) => `${value >= 0 ? "+" : ""}${value}`;
-    note(`${cancel ? "已取消。" : ""}已解析 ${cancel ? "部分" : String(oldest.length)} 段日志，任务事件 ${events.length} 条。完成 ${sign(done.size - before.done)}，进行中 ${sign(started.size - before.started)}，失败 ${sign(failed.size - before.failed)}。`);
-    noteTaskSynced();
+    note(
+      `已解析 ${String(oldest.length)} 段日志，任务事件 ${events.length} 条。完成 ${sign(result.progress.done.size - result.latest.done.size)}，进行中 ${sign(result.progress.started.size - result.latest.started.size)}，失败 ${sign(result.progress.failed.size - result.latest.failed.size)}。`,
+    );
+    noteTaskSynced(selectedMode);
     closeLogSync();
-    await reloadTaskProgress();
+    await Promise.all([reloadTaskProgress(selectedMode), reloadMapTaskProgress(selectedMode)]);
   } catch (error) {
-    note(error instanceof Error ? error.message : "同步日志失败");
+    if (taskProgressAccountEpochIsCurrent(accountEpoch)) {
+      note(error instanceof Error ? error.message : "同步日志失败");
+    }
   } finally {
     busy = false;
     cancel = false;

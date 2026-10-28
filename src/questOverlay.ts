@@ -1,6 +1,15 @@
 /** 与网页端 buildRaidPrepOverlays / 标签聚类 / 按勾选过滤同一套规则。 */
 
-export const QUEST_COLORS = ["#e8c36a", "#6cb6ff", "#6fbf4a", "#e08a2c", "#d44a4a", "#c77dff", "#4ab8b8", "#f0a3c2"] as const;
+export const QUEST_COLORS = [
+  "#e8c36a",
+  "#6cb6ff",
+  "#6fbf4a",
+  "#e08a2c",
+  "#d44a4a",
+  "#c77dff",
+  "#4ab8b8",
+  "#f0a3c2",
+] as const;
 export const QUEST_HELP_COLOR = "#8a8878";
 export const QUEST_OTHER_FLOOR = 0.28;
 const LABEL_PX = 48;
@@ -112,7 +121,11 @@ type Objective = {
   count?: number | null;
   maps?: Named[] | null;
   zones?: Zone[] | null;
-  possible_locations?: Array<{ map_slug?: string | null; map_name?: string | null; positions?: Array<{ x?: number | null; y?: number | null; z?: number | null }> | null }> | null;
+  possible_locations?: Array<{
+    map_slug?: string | null;
+    map_name?: string | null;
+    positions?: Array<{ x?: number | null; y?: number | null; z?: number | null }> | null;
+  }> | null;
   required_keys?: Named[][] | null;
 };
 
@@ -156,7 +169,8 @@ export function questPeople(rows: readonly { name?: string | null; userId?: numb
   for (const row of rows) {
     const name = (row.name || "").trim();
     if (!name) continue;
-    const userId = typeof row.userId === "number" && Number.isFinite(row.userId) ? row.userId : undefined;
+    const userId =
+      typeof row.userId === "number" && Number.isFinite(row.userId) ? row.userId : undefined;
     const person = userId != null ? { name, userId } : { name };
     const key = personKey(person);
     if (seen.has(key)) continue;
@@ -179,7 +193,12 @@ export function parentQuestSelection(keys: readonly string[], parentOn: boolean)
   return { show: true, off: [] as string[] };
 }
 
-export function personQuestSelection(keys: readonly string[], off: ReadonlySet<string>, show: boolean, toggled: string) {
+export function personQuestSelection(
+  keys: readonly string[],
+  off: ReadonlySet<string>,
+  show: boolean,
+  toggled: string,
+) {
   if (!show) return { show: true, off: keys.filter((key) => key && key !== toggled) };
   const next = new Set(off);
   if (next.has(toggled)) next.delete(toggled);
@@ -192,7 +211,10 @@ function finite(value: number | null | undefined): value is number {
 }
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function mapKeys(slug: string) {
@@ -207,7 +229,10 @@ function mapKeys(slug: string) {
 function hitsMap(loc: { map_slug?: string | null; map_name?: string | null }, keys: Set<string>) {
   const slug = (loc.map_slug || "").trim().toLowerCase();
   if (slug && keys.has(slug)) return true;
-  const name = (loc.map_name || "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+  const name = (loc.map_name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
   return Boolean(name && keys.has(name));
 }
 
@@ -222,7 +247,10 @@ function readable(name: string | null | undefined, id?: string | null) {
 function stepText(obj: Objective) {
   const text = readable(obj.description, obj.id) || TYPE_LABEL[(obj.type || "").trim()] || "";
   if (!text) return "";
-  const count = (obj.type || "").trim() === "shoot" && finite(obj.count) && obj.count > 1 ? Math.trunc(obj.count) : 0;
+  const count =
+    (obj.type || "").trim() === "shoot" && finite(obj.count) && obj.count > 1
+      ? Math.trunc(obj.count)
+      : 0;
   const withCount = count > 1 ? `${text} ×${count}` : text;
   return obj.optional ? `${withCount}（可选）` : withCount;
 }
@@ -231,7 +259,8 @@ function applies(obj: Objective, keys: Set<string>) {
   const maps = obj.maps || [];
   const zones = obj.zones || [];
   const locs = obj.possible_locations || [];
-  const located = maps.some((map) => (map.slug || "").trim()) || zones.length > 0 || locs.length > 0;
+  const located =
+    maps.some((map) => (map.slug || "").trim()) || zones.length > 0 || locs.length > 0;
   if (!located) return true;
   if (maps.some((map) => keys.has((map.slug || "").trim().toLowerCase()))) return true;
   if (zones.some((zone) => hitsMap(zone, keys))) return true;
@@ -255,7 +284,9 @@ function keyRefs(obj: Objective) {
   return out;
 }
 
-function pointsOf(rows: Array<{ x?: number | null; y?: number | null; z?: number | null }> | null | undefined) {
+function pointsOf(
+  rows: Array<{ x?: number | null; y?: number | null; z?: number | null }> | null | undefined,
+) {
   const out: QuestPoint[] = [];
   for (const row of rows || []) {
     if (!finite(row.x) || !finite(row.z)) continue;
@@ -284,7 +315,8 @@ function uniquePoints(points: QuestPoint[]) {
 }
 
 function zoneSpan(zone: Zone): QuestSpan | null {
-  if (finite(zone.top) && finite(zone.bottom)) return { min: Math.min(zone.top, zone.bottom), max: Math.max(zone.top, zone.bottom) };
+  if (finite(zone.top) && finite(zone.bottom))
+    return { min: Math.min(zone.top, zone.bottom), max: Math.max(zone.top, zone.bottom) };
   if (finite(zone.y)) return { min: zone.y, max: zone.y };
   return null;
 }
@@ -307,7 +339,12 @@ function centroid(points: QuestPoint[]): QuestPoint {
 }
 
 function taskName(task: QuestTask) {
-  return readable(task.name, task.id) || readable(task.normalized_name, task.id) || (task.normalized_name || "").trim() || task.id;
+  return (
+    readable(task.name, task.id) ||
+    readable(task.normalized_name, task.id) ||
+    (task.normalized_name || "").trim() ||
+    task.id
+  );
 }
 
 export function buildQuestOverlays(tasks: readonly QuestTask[], mapSlug: string): QuestOverlay[] {
@@ -336,13 +373,19 @@ export function buildQuestOverlays(tasks: readonly QuestTask[], mapSlug: string)
       let zoneIdx = 0;
       for (const zone of obj.zones || []) {
         if (!hitsMap(zone, keys)) continue;
-        const anchor = finite(zone.x) && finite(zone.z) ? pointKey({ x: zone.x, z: zone.z, ...(finite(zone.y) ? { y: zone.y } : {}) }) : (zone.id || "").trim();
+        const anchor =
+          finite(zone.x) && finite(zone.z)
+            ? pointKey({ x: zone.x, z: zone.z, ...(finite(zone.y) ? { y: zone.y } : {}) })
+            : (zone.id || "").trim();
         if (anchor) {
           if (seenZones.has(anchor)) continue;
           seenZones.add(anchor);
         }
         const outline = pointsOf(zone.outline);
-        const center = finite(zone.x) && finite(zone.z) ? [{ x: zone.x, z: zone.z, ...(finite(zone.y) ? { y: zone.y } : {}) }] : [];
+        const center =
+          finite(zone.x) && finite(zone.z)
+            ? [{ x: zone.x, z: zone.z, ...(finite(zone.y) ? { y: zone.y } : {}) }]
+            : [];
         const polygon = outline.length >= 3 ? outline : [];
         const points = polygon.length ? center : [...center, ...outline];
         if (!polygon.length && !points.length) continue;
@@ -409,7 +452,12 @@ export function buildQuestOverlays(tasks: readonly QuestTask[], mapSlug: string)
   return overlays;
 }
 
-function viewerFinished(taskId: string, objectiveId: string, skipped: ReadonlyMap<string, ReadonlySet<string>>, doneTasks: ReadonlySet<string>) {
+function viewerFinished(
+  taskId: string,
+  objectiveId: string,
+  skipped: ReadonlyMap<string, ReadonlySet<string>>,
+  doneTasks: ReadonlySet<string>,
+) {
   if (doneTasks.has(taskId)) return true;
   const id = objectiveId.trim();
   return Boolean(id && skipped.get(taskId)?.has(id));
@@ -426,8 +474,15 @@ function personFinished(
 ) {
   const id = objectiveId.trim();
   if (!id) return false;
-  if (person.userId != null && dones.some((row) => row.userId === person.userId && row.taskId === taskId && row.objectiveId === id)) return true;
-  if (selfUserId != null && person.userId === selfUserId) return viewerFinished(taskId, id, skipped, doneTasks);
+  if (
+    person.userId != null &&
+    dones.some(
+      (row) => row.userId === person.userId && row.taskId === taskId && row.objectiveId === id,
+    )
+  )
+    return true;
+  if (selfUserId != null && person.userId === selfUserId)
+    return viewerFinished(taskId, id, skipped, doneTasks);
   return false;
 }
 
@@ -445,11 +500,30 @@ export function filterQuestOverlays(
   if (opts.selectedKeys && !opts.selectedKeys.size) return [];
   return overlays.flatMap((row) => {
     const people = questPeople(opts.peopleByTask.get(row.taskId) || []);
-    if (opts.selectedKeys && people.length && !people.some((person) => opts.selectedKeys!.has(personKey(person)))) return [];
+    if (
+      opts.selectedKeys &&
+      people.length &&
+      !people.some((person) => opts.selectedKeys!.has(personKey(person)))
+    )
+      return [];
     const id = row.objectiveId.trim();
-    const selected = opts.selectedKeys ? people.filter((person) => opts.selectedKeys!.has(personKey(person))) : [];
-    if (id && !selected.length && viewerFinished(row.taskId, id, opts.skipped, opts.doneTasks)) return [];
-    const needed = selected.filter((person) => !personFinished(person, row.taskId, id, opts.dones, opts.skipped, opts.doneTasks, opts.selfUserId));
+    const selected = opts.selectedKeys
+      ? people.filter((person) => opts.selectedKeys!.has(personKey(person)))
+      : [];
+    if (id && !selected.length && viewerFinished(row.taskId, id, opts.skipped, opts.doneTasks))
+      return [];
+    const needed = selected.filter(
+      (person) =>
+        !personFinished(
+          person,
+          row.taskId,
+          id,
+          opts.dones,
+          opts.skipped,
+          opts.doneTasks,
+          opts.selfUserId,
+        ),
+    );
     if (id && selected.length && !needed.length) return [];
     const done = Boolean(id && viewerFinished(row.taskId, id, opts.skipped, opts.doneTasks));
     return [{ ...row, done, neededBy: needed }];
@@ -474,7 +548,12 @@ export function locateQuestPoints(task: QuestTask, mapSlug: string, skipped: Rea
     for (const zone of obj.zones || []) {
       if (!hitsMap(zone, keys)) continue;
       const outline = pointsOf(zone.outline);
-      const center = finite(zone.x) && finite(zone.z) ? { x: zone.x, z: zone.z, ...(finite(zone.y) ? { y: zone.y } : {}) } : outline.length >= 3 ? centroid(outline) : outline[0];
+      const center =
+        finite(zone.x) && finite(zone.z)
+          ? { x: zone.x, z: zone.z, ...(finite(zone.y) ? { y: zone.y } : {}) }
+          : outline.length >= 3
+            ? centroid(outline)
+            : outline[0];
       if (!center) continue;
       const span = zoneSpan(zone);
       push(bucket, span ? { ...center, y: (span.min + span.max) / 2 } : center);
@@ -488,11 +567,15 @@ export function locateQuestPoints(task: QuestTask, mapSlug: string, skipped: Rea
 }
 
 function labelSeeds(row: QuestOverlay) {
-  if (row.outline.length >= 3) return row.points.length ? [centroid(row.points)] : [centroid(row.outline)];
+  if (row.outline.length >= 3)
+    return row.points.length ? [centroid(row.points)] : [centroid(row.outline)];
   return row.points;
 }
 
-export function clusterQuestLabels(overlays: readonly QuestOverlay[], project: (point: QuestPoint) => QuestPoint): QuestLabel[] {
+export function clusterQuestLabels(
+  overlays: readonly QuestOverlay[],
+  project: (point: QuestPoint) => QuestPoint,
+): QuestLabel[] {
   type Seed = QuestPoint & QuestLabelItem;
   const seeds: Seed[] = [];
   for (const row of overlays) {
@@ -604,11 +687,17 @@ export function clusterQuestLabels(overlays: readonly QuestOverlay[], project: (
 }
 
 export function overlayForLabel(overlays: readonly QuestOverlay[], item: QuestLabelItem) {
-  return overlays.find((row) => row.taskId === item.taskId && row.optional === item.optional && row.title === item.title);
+  return overlays.find(
+    (row) =>
+      row.taskId === item.taskId && row.optional === item.optional && row.title === item.title,
+  );
 }
 
 function traderImg(slug: string) {
-  const safe = slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const safe = slug
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "");
   if (!safe) return "";
   const icon = esc(`https://tarkov.dev/images/traders/${safe}-icon.jpg`);
   const portrait = esc(`https://tarkov.dev/images/traders/${safe}-portrait.png`);
@@ -626,42 +715,82 @@ function keyLabel(names: readonly string[], ids: readonly string[], showNoKey: b
 export function questLabelHtml(item: QuestLabelItem, offFloor: boolean, done: boolean) {
   const title = item.optional ? `${item.title}（可选）` : item.title;
   const keys = keyLabel(item.keyNames, item.keyIds, item.showNoKey);
-  const keyMark = keys ? `<span class="${item.showNoKey ? "quest-label-nokey" : "quest-label-key"}">${esc(keys)}</span>` : "";
+  const keyMark = keys
+    ? `<span class="${item.showNoKey ? "quest-label-nokey" : "quest-label-key"}">${esc(keys)}</span>`
+    : "";
   const help = done ? `<span class="quest-label-help">帮</span>` : "";
   const paint = paintColor(item.color, done);
   return `<span class="quest-label-row${offFloor ? " quest-label-off" : ""}" data-task-id="${esc(item.taskId)}">${traderImg(item.traderSlug)}<span class="quest-name" style="color:${paint}">${esc(title)}</span>${help}${keyMark}</span>`;
 }
 
 export function questBubbleHtml(
-  row: Pick<QuestOverlay, "title" | "subtitle" | "steps" | "color" | "traderSlug" | "keyNames" | "keyIds" | "showNoKey" | "kind" | "done" | "neededBy">,
+  row: Pick<
+    QuestOverlay,
+    | "title"
+    | "subtitle"
+    | "steps"
+    | "color"
+    | "traderSlug"
+    | "keyNames"
+    | "keyIds"
+    | "showNoKey"
+    | "kind"
+    | "done"
+    | "neededBy"
+  >,
   actions: readonly { id: string; label: string }[] = [],
   hint = "",
 ) {
-  const steps = row.steps.length ? row.steps : row.subtitle ? [{ text: row.subtitle, active: true }] : [];
+  const steps = row.steps.length
+    ? row.steps
+    : row.subtitle
+      ? [{ text: row.subtitle, active: true }]
+      : [];
   const stepHtml = steps.length
     ? `<span class="quest-tip-steps">${steps.map((step) => `<span class="quest-tip-step${step.active ? " on" : ""}"${step.active ? ` style="color:${esc(paintColor(row.color, row.done))}"` : ""}>${esc(step.text)}</span>`).join("")}</span>`
     : "";
-  const keys = row.keyNames.filter(Boolean).map((name, index) => {
-    const id = row.keyIds[index] || "";
-    const mine = ownedKeys && id ? ownedKeys.has(id) : null;
-    const klass = mine == null ? "" : mine ? " owned" : " missing";
-    return `<span class="quest-tip-key${klass}">${esc(keyMark(name, id))}</span>`;
-  }).join("");
-  const keyRow = keys ? `<span class="quest-tip-keys"><span class="quest-tip-key-label">所需钥匙</span>${keys}</span>` : row.showNoKey ? `<span class="quest-tip-nokey">不需要钥匙</span>` : "";
-  const help = row.done ? `<span class="quest-tip-help">你已完成，地图上留给还没勾的队友</span>` : "";
+  const keys = row.keyNames
+    .filter(Boolean)
+    .map((name, index) => {
+      const id = row.keyIds[index] || "";
+      const mine = ownedKeys && id ? ownedKeys.has(id) : null;
+      const klass = mine == null ? "" : mine ? " owned" : " missing";
+      return `<span class="quest-tip-key${klass}">${esc(keyMark(name, id))}</span>`;
+    })
+    .join("");
+  const keyRow = keys
+    ? `<span class="quest-tip-keys"><span class="quest-tip-key-label">所需钥匙</span>${keys}</span>`
+    : row.showNoKey
+      ? `<span class="quest-tip-nokey">不需要钥匙</span>`
+      : "";
+  const help = row.done
+    ? `<span class="quest-tip-help">你已完成，地图上留给还没勾的队友</span>`
+    : "";
   const people = questPeople(row.neededBy || []);
   const chips = people.length
     ? `<span class="quest-tip-people">${row.done ? `<span class="quest-tip-lead">还需</span>` : ""}${people.map((person) => `<span class="quest-tip-chip"><i style="background:${esc(person.userId != null ? colorForUserId(person.userId) : colorForTaskId(person.name))}"></i>${esc(person.name)}</span>`).join("")}</span>`
     : "";
   const hintHtml = hint ? `<span class="quest-tip-help">${esc(hint)}</span>` : "";
-  const actionHtml = actions.length ? `<span class="quest-tip-actions">${actions.map((action) => `<button type="button" class="quest-tip-action" data-quest-action="${esc(action.id)}">${esc(action.label)}</button>`).join("")}</span>` : "";
+  const actionHtml = actions.length
+    ? `<span class="quest-tip-actions">${actions.map((action) => `<button type="button" class="quest-tip-action" data-quest-action="${esc(action.id)}">${esc(action.label)}</button>`).join("")}</span>`
+    : "";
   const paint = paintColor(row.color, row.done);
   return `<span class="quest-tip"><span class="quest-tip-row">${traderImg(row.traderSlug)}<span class="quest-tip-name" style="color:${paint}">${esc(row.title)}</span></span>${stepHtml}${keyRow}${help}${chips}${hintHtml}${actionHtml}</span>`;
 }
 
-export function questActions(canGuide: boolean, canComplete: boolean, objectiveId: string, alreadyDone: boolean) {
+export function questActions(
+  canGuide: boolean,
+  canComplete: boolean,
+  objectiveId: string,
+  alreadyDone: boolean,
+) {
   const out: { id: string; label: string }[] = [];
   if (canGuide) out.push({ id: "guide", label: "查看攻略" });
-  if (canComplete && objectiveId.trim()) out.push(alreadyDone ? { id: "uncomplete", label: "取消完成该步骤" } : { id: "complete", label: "已完成该步骤" });
+  if (canComplete && objectiveId.trim())
+    out.push(
+      alreadyDone
+        ? { id: "uncomplete", label: "取消完成该步骤" }
+        : { id: "complete", label: "已完成该步骤" },
+    );
   return out;
 }

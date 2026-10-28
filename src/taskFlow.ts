@@ -1,6 +1,21 @@
+import { invoke } from "./tauriBridge";
 import { mapTitle } from "./mapNames";
 import { fadeIn, fadeOut } from "./motion";
 import { isPending, spin } from "./spinner";
+import {
+  cloneTaskProgress,
+  currentTaskProgressAccountEpoch,
+  emptyTaskProgress,
+  taskProgressAccountEpochIsCurrent,
+  mergeTaskProgress,
+  readTaskProgress,
+  serializeTaskProgress,
+  taskProgressBody,
+  taskProgressPath,
+  withTaskGameMode,
+  type TaskGameMode,
+  type TaskProgress,
+} from "./taskProgressQueue";
 
 type Quest = {
   id: string;
@@ -76,12 +91,24 @@ let done = new Set<string>();
 let started = new Set<string>();
 let failed = new Set<string>();
 let objectives: { task_id: string; objective_id: string }[] = [];
+let progressMode: TaskGameMode = "pvp";
+let progressBaseline: TaskProgress = emptyTaskProgress();
+let progressEditVersion = 0;
+let progressSavedWatch: ((mode: TaskGameMode) => void) | null = null;
+let taskPageGeneration = 0;
 let traderSlug = "";
 let visibleTrader = "";
 let keyword = "";
 let view: View = loadView();
 let note = "正在读取任务进度…";
 let saving = false;
+let savingMode: TaskGameMode | null = null;
+let savingAccountEpoch: number | null = null;
+let progressSaveGeneration = 0;
+let saveAgain = false;
+let saveAgainStamp = false;
+let deferredSaveMode: TaskGameMode | null = null;
+let deferredSaveStamp = false;
 let shellReady = false;
 let railSig = "";
 let flashTrader = "";
@@ -124,17 +151,36 @@ function loadView(): View {
   }
 }
 
-function gameMode(): "pvp" | "pve" {
+function gameMode(): TaskGameMode {
   return localStorage.getItem("zhange.guides.tarkov.gameMode") === "pve" ? "pve" : "pvp";
+}
+
+function currentTaskProgress(): TaskProgress {
+  return {
+    done: new Set(done),
+    started: new Set(started),
+    failed: new Set(failed),
+    objectives: objectives.map((item) => ({ ...item })),
+  };
+}
+
+function applyTaskProgress(progress: TaskProgress) {
+  done = new Set(progress.done);
+  started = new Set(progress.started);
+  failed = new Set(progress.failed);
+  objectives = progress.objectives.map((item) => ({ ...item }));
 }
 
 function factionChoice() {
   try {
     const parsed = JSON.parse(localStorage.getItem(FACTION_KEY) || "null") as unknown;
-    const raw = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)[gameMode()]
-      : parsed;
-    const name = String(raw || "").trim().toLowerCase();
+    const raw =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)[gameMode()]
+        : parsed;
+    const name = String(raw || "")
+      .trim()
+      .toLowerCase();
     return name === "bear" || name === "usec" ? name : "";
   } catch {
     return "";
@@ -158,7 +204,10 @@ function nowStamp() {
 
 function readSyncAt() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(DONES_KEY) || "null") as { v?: number; syncedAt?: Record<string, string> } | null;
+    const parsed = JSON.parse(localStorage.getItem(DONES_KEY) || "null") as {
+      v?: number;
+      syncedAt?: Record<string, string>;
+    } | null;
     const fromWeb = parsed?.v === 1 ? String(parsed.syncedAt?.[gameMode()] || "").trim() : "";
     if (fromWeb) return fromWeb;
   } catch {
@@ -167,15 +216,18 @@ function readSyncAt() {
   return sessionStorage.getItem(`${SYNC_FALLBACK}.${gameMode()}`) || "";
 }
 
-function stampSync(writeNote: boolean) {
+function stampSync(writeNote: boolean, mode = gameMode()) {
   const at = nowStamp();
-  sessionStorage.setItem(`${SYNC_FALLBACK}.${gameMode()}`, at);
+  sessionStorage.setItem(`${SYNC_FALLBACK}.${mode}`, at);
   try {
     const raw = localStorage.getItem(DONES_KEY);
-    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : null;
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.v === 1) {
-      const synced = parsed.syncedAt && typeof parsed.syncedAt === "object" ? parsed.syncedAt as Record<string, string> : {};
-      parsed.syncedAt = { ...synced, [gameMode()]: at };
+      const synced =
+        parsed.syncedAt && typeof parsed.syncedAt === "object"
+          ? (parsed.syncedAt as Record<string, string>)
+          : {};
+      parsed.syncedAt = { ...synced, [mode]: at };
       localStorage.setItem(DONES_KEY, JSON.stringify(parsed));
     }
   } catch {
@@ -186,12 +238,15 @@ function stampSync(writeNote: boolean) {
   if (node) node.textContent = `上次同步时间：${at}`;
 }
 
-export function noteTaskSynced() {
-  stampSync(false);
+export function noteTaskSynced(mode = gameMode()) {
+  stampSync(false, mode);
 }
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function traderLabel(name: string) {
@@ -220,9 +275,17 @@ function visibleQuests() {
 }
 
 function matches(task: Quest, query: string) {
-  const needle = query.toLowerCase().replace(/[-_/]+/g, " ").replace(/\s+/g, " ").trim();
+  const needle = query
+    .toLowerCase()
+    .replace(/[-_/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!needle) return true;
-  const hay = `${task.name} ${task.id} ${task.normalized} ${task.lineHint}`.toLowerCase().replace(/[-_/]+/g, " ").replace(/\s+/g, " ").trim();
+  const hay = `${task.name} ${task.id} ${task.normalized} ${task.lineHint}`
+    .toLowerCase()
+    .replace(/[-_/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   return hay.includes(needle) || hay.replace(/ /g, "").includes(needle.replace(/ /g, ""));
 }
 
@@ -299,10 +362,12 @@ function collectClosed(items: Quest[]) {
         grew = true;
         continue;
       }
-      if (item.failOr.some((raw) => {
-        const pid = key(raw);
-        return Boolean(pid) && !done.has(pid) && !failed.has(pid) && closed.has(pid);
-      })) {
+      if (
+        item.failOr.some((raw) => {
+          const pid = key(raw);
+          return Boolean(pid) && !done.has(pid) && !failed.has(pid) && closed.has(pid);
+        })
+      ) {
         closed.add(id);
         grew = true;
       }
@@ -313,9 +378,11 @@ function collectClosed(items: Quest[]) {
 
 function available(task: Quest, closed: Set<string>) {
   if (statusOf(task, closed) !== "todo") return false;
-  return task.prereq.every((id) => has(done, id))
-    && task.failPrereq.every((id) => has(failed, id))
-    && task.failOr.every((id) => has(done, id) || has(failed, id));
+  return (
+    task.prereq.every((id) => has(done, id)) &&
+    task.failPrereq.every((id) => has(failed, id)) &&
+    task.failOr.every((id) => has(done, id) || has(failed, id))
+  );
 }
 
 function derived(task: Quest, closed: Set<string>) {
@@ -411,7 +478,13 @@ function descendants(taskId: string, childrenById: Map<string, string[]>) {
   return out;
 }
 
-function applyMutex(doneIds: string[], startedIds: string[], failedIds: string[], mutexById: Map<string, string[]>, prefer: string[]) {
+function applyMutex(
+  doneIds: string[],
+  startedIds: string[],
+  failedIds: string[],
+  mutexById: Map<string, string[]>,
+  prefer: string[],
+) {
   const doneList = asIdList(doneIds);
   const doneSet = new Set(doneList);
   const drop = new Set<string>();
@@ -462,7 +535,12 @@ function applyMutex(doneIds: string[], startedIds: string[], failedIds: string[]
   return { done: nextDone, started: nextStarted, failed: nextFailed };
 }
 
-function dropBlocked(doneIds: string[], startedIds: string[], failedIds: string[], blockedById: Map<string, string[]>) {
+function dropBlocked(
+  doneIds: string[],
+  startedIds: string[],
+  failedIds: string[],
+  blockedById: Map<string, string[]>,
+) {
   const doneList = asIdList(doneIds);
   const startedList = asIdList(startedIds);
   const failedList = asIdList(failedIds);
@@ -480,12 +558,23 @@ function dropBlocked(doneIds: string[], startedIds: string[], failedIds: string[
   };
 }
 
-function applyLine(doneIds: string[], startedIds: string[], failedIds: string[], index: ReturnType<typeof lineIndex>, prefer: string[]) {
+function applyLine(
+  doneIds: string[],
+  startedIds: string[],
+  failedIds: string[],
+  index: ReturnType<typeof lineIndex>,
+  prefer: string[],
+) {
   const mutexed = applyMutex(doneIds, startedIds, failedIds, index.mutexById, prefer);
   return dropBlocked(mutexed.done, mutexed.started, mutexed.failed, index.blockedById);
 }
 
-function walkComplete(startId: string, pools: { done: Set<string>; started: Set<string>; failed: Set<string> }, prereqById: Map<string, string[]>, skipRoot: boolean) {
+function walkComplete(
+  startId: string,
+  pools: { done: Set<string>; started: Set<string>; failed: Set<string> },
+  prereqById: Map<string, string[]>,
+  skipRoot: boolean,
+) {
   const walking = new Set<string>();
   const visit = (id: string) => {
     if (!id || walking.has(id) || walking.size > 32) return;
@@ -536,7 +625,13 @@ function setLineStatus(taskId: string, status: Status) {
     dropSelf();
     dropKids();
   }
-  return applyLine([...pools.done], [...pools.started], [...pools.failed], index, status === "done" ? [ident] : []);
+  return applyLine(
+    [...pools.done],
+    [...pools.started],
+    [...pools.failed],
+    index,
+    status === "done" ? [ident] : [],
+  );
 }
 
 function ancestorSet(taskId: string, catalog: Map<string, Quest>) {
@@ -556,7 +651,9 @@ function ancestorSet(taskId: string, catalog: Map<string, Quest>) {
 function primaryParent(task: Quest, catalog: Map<string, Quest>) {
   const parents = task.prereq.filter((id) => catalog.has(id));
   if (!parents.length) return "";
-  const latest = parents.filter((left) => !parents.some((right) => right !== left && ancestorSet(right, catalog).has(left)));
+  const latest = parents.filter(
+    (left) => !parents.some((right) => right !== left && ancestorSet(right, catalog).has(left)),
+  );
   latest.sort();
   return latest[0] || parents[0];
 }
@@ -602,7 +699,11 @@ function groupNodes(nodes: FlowNode[]): FlowChild[] {
         }
       }
     }
-    if (clique.length >= 2) out.push({ kind: "choice", options: clique.sort((a, b) => a.task.name.localeCompare(b.task.name, "zh-CN")) });
+    if (clique.length >= 2)
+      out.push({
+        kind: "choice",
+        options: clique.sort((a, b) => a.task.name.localeCompare(b.task.name, "zh-CN")),
+      });
     else out.push({ kind: "task", node: head });
   }
   return out;
@@ -663,7 +764,9 @@ function pruneForest(children: FlowChild[], native: Set<string>): FlowChild[] {
   const out: FlowChild[] = [];
   for (const child of children) {
     if (child.kind === "choice") {
-      const options = child.options.map((node) => pruneNode(node, native)).filter((node): node is FlowNode => Boolean(node));
+      const options = child.options
+        .map((node) => pruneNode(node, native))
+        .filter((node): node is FlowNode => Boolean(node));
       if (options.length >= 2) out.push({ kind: "choice", options });
       else if (options.length === 1) out.push({ kind: "task", node: options[0] });
       continue;
@@ -690,7 +793,9 @@ function filterForest(children: FlowChild[], keep: (task: Quest) => boolean): Fl
   const out: FlowChild[] = [];
   for (const child of children) {
     if (child.kind === "choice") {
-      const options = child.options.map((node) => filterNode(node, keep)).filter((node): node is FlowNode => Boolean(node));
+      const options = child.options
+        .map((node) => filterNode(node, keep))
+        .filter((node): node is FlowNode => Boolean(node));
       if (options.length >= 2) out.push({ kind: "choice", options });
       else if (options.length === 1) out.push({ kind: "task", node: options[0] });
       continue;
@@ -711,7 +816,8 @@ function childDepth(child: FlowChild): number {
 }
 
 function childName(child: FlowChild) {
-  if (child.kind === "choice") return child.options.map((row) => row.task.name || row.task.id).join(",");
+  if (child.kind === "choice")
+    return child.options.map((row) => row.task.name || row.task.id).join(",");
   return child.node.task.name || child.node.task.id;
 }
 
@@ -719,10 +825,15 @@ function splitForest(forest: FlowChild[]) {
   const chains: FlowChild[] = [];
   const isolates: FlowChild[] = [];
   for (const child of forest) {
-    const sequenced = child.kind === "choice" || child.node.children.length > 0 || child.node.extra.length > 0;
+    const sequenced =
+      child.kind === "choice" || child.node.children.length > 0 || child.node.extra.length > 0;
     (sequenced ? chains : isolates).push(child);
   }
-  chains.sort((left, right) => childDepth(right) - childDepth(left) || childName(left).localeCompare(childName(right), "zh-CN"));
+  chains.sort(
+    (left, right) =>
+      childDepth(right) - childDepth(left) ||
+      childName(left).localeCompare(childName(right), "zh-CN"),
+  );
   isolates.sort((left, right) => childName(left).localeCompare(childName(right), "zh-CN"));
   return { chains, isolates };
 }
@@ -767,10 +878,12 @@ function relations(node: FlowNode) {
 function ribbonGradient(kinds: Array<keyof typeof RIBBON_COLOR>) {
   if (kinds.length === 1) return RIBBON_COLOR[kinds[0]];
   const slice = 100 / kinds.length;
-  return `linear-gradient(to bottom, ${kinds.map((kind, index) => {
-    const color = RIBBON_COLOR[kind];
-    return `${color} ${index * slice}% ${(index + 1) * slice}%`;
-  }).join(", ")})`;
+  return `linear-gradient(to bottom, ${kinds
+    .map((kind, index) => {
+      const color = RIBBON_COLOR[kind];
+      return `${color} ${index * slice}% ${(index + 1) * slice}%`;
+    })
+    .join(", ")})`;
 }
 
 function traderIcon(slug: string) {
@@ -794,17 +907,45 @@ function statusSelect(task: Quest, closed: Set<string>) {
     const disabled = !WRITABLE.has(item) && item !== status;
     return `<option value="${item}"${item === status ? " selected" : ""}${disabled ? " disabled" : ""}>${STATUS_LABEL[item]}</option>`;
   }).join("");
-  const tone = status === "done" ? " status-done" : status === "active" ? " status-active" : status === "failed" ? " status-failed" : status === "unreachable" ? " status-unreachable" : "";
+  const tone =
+    status === "done"
+      ? " status-done"
+      : status === "active"
+        ? " status-active"
+        : status === "failed"
+          ? " status-failed"
+          : status === "unreachable"
+            ? " status-unreachable"
+            : "";
   return `<select class="task-status${tone}" data-task-status="${esc(task.id)}" aria-label="${esc(displayName(task))} 状态"${lock ? " disabled" : ""}>${options}</select>`;
 }
 
-function flowCard(node: FlowNode, closed: Set<string>, lane: string, showTrader: boolean, jump: boolean) {
+function flowCard(
+  node: FlowNode,
+  closed: Set<string>,
+  lane: string,
+  showTrader: boolean,
+  jump: boolean,
+) {
   const task = node.task;
   const status = statusOf(task, closed);
-  const rel = jump ? { prereqs: [], blocked: [], conflicts: [], kinds: [] as Array<keyof typeof RIBBON_COLOR> } : relations(node);
-  const tone = status === "done" ? " card-done" : status === "failed" ? " card-failed" : status === "unreachable" ? " card-unreachable" : "";
+  const rel = jump
+    ? { prereqs: [], blocked: [], conflicts: [], kinds: [] as Array<keyof typeof RIBBON_COLOR> }
+    : relations(node);
+  const tone =
+    status === "done"
+      ? " card-done"
+      : status === "failed"
+        ? " card-failed"
+        : status === "unreachable"
+          ? " card-unreachable"
+          : "";
   const native = (task.traderSlug || "") === (lane || "");
-  const domId = jump ? "" : native ? `tarkov-flow-task-${task.id}` : `tarkov-flow-task-${task.id}-in-${lane || "none"}`;
+  const domId = jump
+    ? ""
+    : native
+      ? `tarkov-flow-task-${task.id}`
+      : `tarkov-flow-task-${task.id}-in-${lane || "none"}`;
   const icon = showTrader ? traderIcon(task.traderSlug) : "";
   const ribbon = rel.kinds.length
     ? ` data-flow-ribbon="1" data-prereq="${esc(rel.prereqs.map((item) => item.id).join(","))}" data-blocked="${esc(rel.blocked.map((item) => item.id).join(","))}" data-conflict="${esc(rel.conflicts.map((item) => item.id).join(","))}"`
@@ -838,12 +979,22 @@ function column(node: FlowNode, closed: Set<string>, lane: string, showTrader: b
   return `<div class="flow-col">${flowCard(node, closed, lane, showTrader, false)}${next}</div>`;
 }
 
-function branch(children: FlowChild[], closed: Set<string>, lane: string, showTrader: boolean, root = false): string {
+function branch(
+  children: FlowChild[],
+  closed: Set<string>,
+  lane: string,
+  showTrader: boolean,
+  root = false,
+): string {
   if (!children.length) return "";
   const one = root || children.length === 1;
-  return `<div class="flow-branch${one ? " one" : ""}${root ? " root" : ""}">${children.map((child) => child.kind === "choice"
-    ? `<div class="flow-choice"><span>${choiceLabel(child.options.length)}</span><div class="flow-choice-row">${child.options.map((node) => column(node, closed, lane, showTrader)).join("")}</div></div>`
-    : column(child.node, closed, lane, showTrader)).join("")}</div>`;
+  return `<div class="flow-branch${one ? " one" : ""}${root ? " root" : ""}">${children
+    .map((child) =>
+      child.kind === "choice"
+        ? `<div class="flow-choice"><span>${choiceLabel(child.options.length)}</span><div class="flow-choice-row">${child.options.map((node) => column(node, closed, lane, showTrader)).join("")}</div></div>`
+        : column(child.node, closed, lane, showTrader),
+    )
+    .join("")}</div>`;
 }
 
 function formatMeta(count: Counts, visible: number) {
@@ -873,16 +1024,21 @@ function statsHtml(items: Quest[]) {
 
 function listHtml(groups: ReturnType<typeof traderGroups>, closed: Set<string>) {
   const scoped = traderSlug ? groups.filter((group) => group.slug === traderSlug) : groups;
-  const typeColumns = orderTypes(scoped.flatMap((group) => group.items.flatMap((task) => task.objectives)));
-  const blocks = scoped.map((group) => {
-    const rows = group.items.filter((task) => matches(task, keyword)).sort((left, right) => {
-      const diff = rank(left, closed) - rank(right, closed);
-      return diff || displayName(left).localeCompare(displayName(right), "zh-CN");
-    });
-    if (!rows.length) return "";
-    const count = summary(group.items);
-    const icon = traderIcon(group.slug);
-    return `<section class="task-group">
+  const typeColumns = orderTypes(
+    scoped.flatMap((group) => group.items.flatMap((task) => task.objectives)),
+  );
+  const blocks = scoped
+    .map((group) => {
+      const rows = group.items
+        .filter((task) => matches(task, keyword))
+        .sort((left, right) => {
+          const diff = rank(left, closed) - rank(right, closed);
+          return diff || displayName(left).localeCompare(displayName(right), "zh-CN");
+        });
+      if (!rows.length) return "";
+      const count = summary(group.items);
+      const icon = traderIcon(group.slug);
+      return `<section class="task-group">
       <h3 class="flow-head">
         <span class="flow-head-title">${icon ? `<img src="${esc(icon)}" alt="" />` : ""}<span>${esc(group.name)}</span></span>
         <span class="flow-head-meta">${esc(formatMeta(count, rows.length))}</span>
@@ -892,64 +1048,89 @@ function listHtml(groups: ReturnType<typeof traderGroups>, closed: Set<string>) 
           <th>任务</th><th>状态</th><th>地点</th>
           ${typeColumns.map((type) => `<th class="cell-type" title="${esc(type)}">${esc(typeLabel(type))}</th>`).join("")}
         </tr></thead>
-        <tbody>${rows.map((task) => {
-          const status = statusOf(task, closed);
-          const types = new Set(orderTypes(task.objectives));
-          const place = mapLabel(task);
-          const rowTone = status === "done" ? " row-done" : status === "active" ? " row-active" : status === "failed" ? " row-failed" : status === "unreachable" ? " row-unreachable" : "";
-          return `<tr class="${rowTone.trim()}">
+        <tbody>${rows
+          .map((task) => {
+            const status = statusOf(task, closed);
+            const types = new Set(orderTypes(task.objectives));
+            const place = mapLabel(task);
+            const rowTone =
+              status === "done"
+                ? " row-done"
+                : status === "active"
+                  ? " row-active"
+                  : status === "failed"
+                    ? " row-failed"
+                    : status === "unreachable"
+                      ? " row-unreachable"
+                      : "";
+            return `<tr class="${rowTone.trim()}">
             <td class="cell-name"><button type="button" class="task-name" data-wiki="task" data-wiki-id="${esc(task.id)}">${esc(displayName(task))}</button></td>
             <td class="cell-status">${statusSelect(task, closed)}</td>
             <td class="cell-map">${place ? `<span class="task-map">${esc(place)}</span>` : ""}</td>
             ${typeColumns.map((type) => `<td class="cell-type">${types.has(type) ? `<span class="task-type-dot" data-tone="${esc(type)}" title="${esc(typeLabel(type))}"></span>` : ""}</td>`).join("")}
           </tr>`;
-        }).join("")}</tbody>
+          })
+          .join("")}</tbody>
       </table></div>
     </section>`;
-  }).filter(Boolean);
+    })
+    .filter(Boolean);
   return blocks.join("") || `<p class="task-empty">当前筛选下无任务</p>`;
 }
 
-function flowHtml(groups: ReturnType<typeof traderGroups>, catalog: Map<string, Quest>, closed: Set<string>) {
-  const lanes = groups.map((group) => {
-    const built = traderForest(group.items, catalog);
-    const forest = keyword.trim() ? filterForest(built, (task) => matches(task, keyword)) : built;
-    return { group, forest, visible: countNodes(forest) };
-  }).filter((lane) => lane.visible > 0);
+function flowHtml(
+  groups: ReturnType<typeof traderGroups>,
+  catalog: Map<string, Quest>,
+  closed: Set<string>,
+) {
+  const lanes = groups
+    .map((group) => {
+      const built = traderForest(group.items, catalog);
+      const forest = keyword.trim() ? filterForest(built, (task) => matches(task, keyword)) : built;
+      return { group, forest, visible: countNodes(forest) };
+    })
+    .filter((lane) => lane.visible > 0);
   if (!lanes.length) return `<p class="task-empty">当前筛选下无任务</p>`;
-  return `<div class="flow-stack">${lanes.map(({ group, forest, visible }) => {
-    const parts = splitForest(forest);
-    const count = summary(group.items);
-    const icon = traderIcon(group.slug);
-    return `<section class="flow-lane${flashTrader === group.slug ? " lane-flash" : ""}" id="tarkov-flow-trader-${esc(group.slug)}" data-flow-trader="${esc(group.slug)}">
+  return `<div class="flow-stack">${lanes
+    .map(({ group, forest, visible }) => {
+      const parts = splitForest(forest);
+      const count = summary(group.items);
+      const icon = traderIcon(group.slug);
+      return `<section class="flow-lane${flashTrader === group.slug ? " lane-flash" : ""}" id="tarkov-flow-trader-${esc(group.slug)}" data-flow-trader="${esc(group.slug)}">
       <h3 class="flow-head">
         <span class="flow-head-title">${icon ? `<img src="${esc(icon)}" alt="" />` : ""}<span>${esc(group.name)}</span></span>
         <span class="flow-head-meta">${esc(formatMeta(count, visible))}</span>
       </h3>
       ${parts.chains.length ? `<div class="flow-canvas"><p class="flow-legend">有序任务</p>${branch(parts.chains, closed, group.slug, true, true)}</div>` : ""}
-      ${parts.isolates.length ? `<section class="flow-isolates"><p class="flow-legend">无序任务 · ${parts.isolates.length}</p><div class="flow-grid">${parts.isolates.map((child) => child.kind === "task" ? column(child.node, closed, group.slug, false) : "").join("")}</div></section>` : ""}
+      ${parts.isolates.length ? `<section class="flow-isolates"><p class="flow-legend">无序任务 · ${parts.isolates.length}</p><div class="flow-grid">${parts.isolates.map((child) => (child.kind === "task" ? column(child.node, closed, group.slug, false) : "")).join("")}</div></section>` : ""}
     </section>`;
-  }).join("")}</div>`;
+    })
+    .join("")}</div>`;
 }
 
 function railHtml(groups: ReturnType<typeof traderGroups>, selected: string) {
   const allOn = !selected;
   return `<button type="button" data-trader="" role="radio" aria-checked="${allOn ? "true" : "false"}" class="trader-all${allOn ? " on" : ""}">全部</button>
-    ${groups.map((group) => {
-      const count = summary(group.items);
-      const icon = traderIcon(group.slug);
-      const pct = count.done + count.active + count.todo + count.failed + count.unreachable
-        ? (count.done / (count.done + count.active + count.todo + count.failed + count.unreachable)) * 100
-        : 0;
-      const on = selected === group.slug;
-      return `<button type="button" data-trader="${esc(group.slug)}" role="radio" aria-checked="${on ? "true" : "false"}" class="${on ? "on" : ""}" title="${esc(group.name)}">
+    ${groups
+      .map((group) => {
+        const count = summary(group.items);
+        const icon = traderIcon(group.slug);
+        const pct =
+          count.done + count.active + count.todo + count.failed + count.unreachable
+            ? (count.done /
+                (count.done + count.active + count.todo + count.failed + count.unreachable)) *
+              100
+            : 0;
+        const on = selected === group.slug;
+        return `<button type="button" data-trader="${esc(group.slug)}" role="radio" aria-checked="${on ? "true" : "false"}" class="${on ? "on" : ""}" title="${esc(group.name)}">
         ${icon ? `<img src="${esc(icon)}" alt="" />` : "<i></i>"}
         <span class="trader-cap">
           <strong>${esc(group.name)}</strong>
           <span class="trader-meta"><em class="${count.done && pct === 100 ? "full" : ""}">${count.done}</em><b><s style="width:${pct}%"></s></b></span>
         </span>
       </button>`;
-    }).join("")}`;
+      })
+      .join("")}`;
 }
 
 function selectedTrader(groups: ReturnType<typeof traderGroups>) {
@@ -967,13 +1148,18 @@ function paint(options: { keepScroll?: boolean; locate?: string } = {}) {
   visibleById = new Map(items.map((task) => [task.id, task]));
   const groups = traderGroups(items);
   const closed = collectClosed(items);
-  const scoped = view === "list" && traderSlug ? groups.find((group) => group.slug === traderSlug)?.items || [] : items;
+  const scoped =
+    view === "list" && traderSlug
+      ? groups.find((group) => group.slug === traderSlug)?.items || []
+      : items;
   overview.innerHTML = statsHtml(view === "tree" ? items : scoped);
   const selected = selectedTrader(groups);
-  const sig = groups.map((group) => {
-    const count = summary(group.items);
-    return `${group.slug}:${count.done}:${CountsTotal(count)}`;
-  }).join(",");
+  const sig = groups
+    .map((group) => {
+      const count = summary(group.items);
+      return `${group.slug}:${count.done}:${CountsTotal(count)}`;
+    })
+    .join(",");
   if (sig !== railSig) {
     railSig = sig;
     const top = rail.scrollTop;
@@ -994,9 +1180,8 @@ function paint(options: { keepScroll?: boolean; locate?: string } = {}) {
     });
   }
   const top = board.scrollTop;
-  board.innerHTML = view === "tree"
-    ? flowHtml(groups, visibleById, closed)
-    : listHtml(groups, closed);
+  board.innerHTML =
+    view === "tree" ? flowHtml(groups, visibleById, closed) : listHtml(groups, closed);
   if (options.keepScroll) {
     board.scrollTop = top;
     board.querySelectorAll<HTMLElement>(".flow-canvas").forEach((node) => {
@@ -1018,7 +1203,10 @@ function paint(options: { keepScroll?: boolean; locate?: string } = {}) {
   if (input && document.activeElement !== input && input.value !== keyword) input.value = keyword;
   if (options.locate !== undefined) {
     if (!options.locate) board.scrollTo({ top: 0, behavior: "smooth" });
-    else document.getElementById(`tarkov-flow-trader-${options.locate}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    else
+      document
+        .getElementById(`tarkov-flow-trader-${options.locate}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
 
@@ -1074,13 +1262,20 @@ function bindShell() {
     paint({ keepScroll: true });
   });
   const board = document.querySelector("#task-board");
-  board?.addEventListener("scroll", () => {
-    hidePop();
-    if (view === "tree") syncVisible();
-  }, { passive: true });
+  board?.addEventListener(
+    "scroll",
+    () => {
+      hidePop();
+      if (view === "tree") syncVisible();
+    },
+    { passive: true },
+  );
   const page = document.querySelector("#task-page");
   page?.addEventListener("mouseover", (event) => {
-    const card = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-flow-ribbon]") : null;
+    const card =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>("[data-flow-ribbon]")
+        : null;
     if (!card || card === popAnchor) return;
     window.clearTimeout(popTimer);
     showPop(card);
@@ -1109,7 +1304,13 @@ function hidePop() {
   });
 }
 
-function peekColumn(title: string, hint: string, tone: string, tasks: Quest[], closed: Set<string>) {
+function peekColumn(
+  title: string,
+  hint: string,
+  tone: string,
+  tasks: Quest[],
+  closed: Set<string>,
+) {
   if (!tasks.length) return "";
   return `<div class="pop-col"><div class="pop-head ${tone}"><strong>${title}</strong><span>${hint}</span></div>${tasks.map((task) => flowCard({ task, extra: [], matched: true, children: [] }, closed, "", true, true)).join("")}</div>`;
 }
@@ -1118,14 +1319,24 @@ function showPop(card: HTMLElement) {
   const pop = document.querySelector<HTMLElement>("#task-pop");
   if (!pop) return;
   const closed = collectClosed(visibleQuests());
-  const read = (name: string) => (card.dataset[name] || "").split(",").map((id) => id.trim()).filter(Boolean);
+  const read = (name: string) =>
+    (card.dataset[name] || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
   const prereqs = lookup(read("prereq"), new Set());
   const blocked = lookup(read("blocked"), new Set());
   const conflicts = lookup(read("conflict"), new Set());
   pop.innerHTML = [
     peekColumn("前置", "你需要先完成下列任务", "pop-prereq", prereqs, closed),
     peekColumn("阻断", "完成以下任务，将会使本任务失败/无法接取", "pop-blocked", blocked, closed),
-    peekColumn("冲突", "完成本任务，将会使下列任务失败/无法接取", "pop-conflict", conflicts, closed),
+    peekColumn(
+      "冲突",
+      "完成本任务，将会使下列任务失败/无法接取",
+      "pop-conflict",
+      conflicts,
+      closed,
+    ),
   ].join("");
   fadeIn(pop);
   popAnchor = card;
@@ -1136,7 +1347,8 @@ function showPop(card: HTMLElement) {
   let left = rect.left - box.width - 8;
   if (left < 8) left = Math.min(rect.right + 8, window.innerWidth - box.width - 8);
   let top = rect.top;
-  if (top + box.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - box.height - 8);
+  if (top + box.height > window.innerHeight - 8)
+    top = Math.max(8, window.innerHeight - box.height - 8);
   pop.style.left = `${Math.max(8, left)}px`;
   pop.style.top = `${top}px`;
 }
@@ -1181,7 +1393,11 @@ function jumpTask(taskId: string) {
   hidePop();
   if (view !== "tree") {
     view = "tree";
-    try { localStorage.setItem(VIEW_KEY, view); } catch { /* 视图偏好写不进时仍跳过去 */ }
+    try {
+      localStorage.setItem(VIEW_KEY, view);
+    } catch {
+      /* 视图偏好写不进时仍跳过去 */
+    }
   }
   flashTask = taskId;
   window.clearTimeout(flashTimer);
@@ -1191,7 +1407,9 @@ function jumpTask(taskId: string) {
   }, 1600);
   paint({ keepScroll: true });
   const exact = document.getElementById(`tarkov-flow-task-${taskId}`);
-  const node = exact || document.querySelector<HTMLElement>(`[id^="tarkov-flow-task-${CSS.escape(taskId)}-in-"]`);
+  const node =
+    exact ||
+    document.querySelector<HTMLElement>(`[id^="tarkov-flow-task-${CSS.escape(taskId)}-in-"]`);
   if (node) node.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
   else {
     const task = quests.find((item) => item.id === taskId);
@@ -1207,6 +1425,35 @@ export function taskPageShell() {
   return shellHtml();
 }
 
+export function watchTaskProgressSaved(callback: (mode: TaskGameMode) => void) {
+  progressSavedWatch = callback;
+}
+
+export function resetTaskProgressForAccountChange() {
+  taskPageGeneration += 1;
+  progressSaveGeneration += 1;
+  quests = [];
+  done.clear();
+  started.clear();
+  failed.clear();
+  objectives = [];
+  progressMode = gameMode();
+  progressBaseline = emptyTaskProgress();
+  progressEditVersion += 1;
+  note = "正在读取任务进度…";
+  shellReady = false;
+  saving = false;
+  savingMode = null;
+  savingAccountEpoch = null;
+  saveAgain = false;
+  saveAgainStamp = false;
+  deferredSaveMode = null;
+  deferredSaveStamp = false;
+  railSig = "";
+  visibleById.clear();
+  hidePop();
+}
+
 function showNote(host: Element) {
   host.innerHTML = isPending(note) ? spin(note) : `<p class="task-note">${esc(note)}</p>`;
   shellReady = false;
@@ -1215,20 +1462,35 @@ function showNote(host: Element) {
 export async function mountTaskPage() {
   const host = document.querySelector("#task-page");
   if (!host) return;
+  const generation = ++taskPageGeneration;
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  const mode = gameMode();
   shellReady = false;
   showNote(host);
   try {
     const [catalog, progress] = await Promise.all([
-      invoke<{ items?: Record<string, unknown>[] }>("site_get", { path: "/guides/tarkov/tasks?layout=all" }),
-      invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" }),
+      invoke<{ items?: Record<string, unknown>[] }>("site_get", {
+        path: withTaskGameMode("/guides/tarkov/tasks?layout=all", mode),
+      }),
+      serializeTaskProgress(async () => {
+        if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return emptyTaskProgress();
+        const raw = await invoke<Record<string, unknown>>("site_get", {
+          path: taskProgressPath(mode),
+        });
+        if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return emptyTaskProgress();
+        return readTaskProgress(raw);
+      }),
     ]);
+    if (generation !== taskPageGeneration || !taskProgressAccountEpochIsCurrent(accountEpoch))
+      return;
     quests = (catalog.items || []).map(readQuest).filter((item): item is Quest => Boolean(item));
-    done = new Set(ids(progress.task_ids || progress.taskIds).map(key));
-    started = new Set(ids(progress.started_ids || progress.startedIds).map(key));
-    failed = new Set(ids(progress.failed_ids || progress.failedIds).map(key));
-    objectives = Array.isArray(progress.objective_dones) ? progress.objective_dones as { task_id: string; objective_id: string }[] : [];
+    progressMode = mode;
+    progressBaseline = cloneTaskProgress(progress);
+    applyTaskProgress(progress);
     note = quests.length ? "" : "没有读到任务";
   } catch (error) {
+    if (generation !== taskPageGeneration || !taskProgressAccountEpochIsCurrent(accountEpoch))
+      return;
     note = error instanceof Error ? error.message : "任务进度读取失败";
     quests = [];
   }
@@ -1241,24 +1503,42 @@ export async function mountTaskPage() {
   paint();
 }
 
-export async function reloadTaskProgress() {
-  if (!document.querySelector("#task-board")) return;
+export async function reloadTaskProgress(mode: TaskGameMode = progressMode) {
+  if (!document.querySelector("#task-board") || mode !== progressMode) return;
+  const generation = taskPageGeneration;
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  const localAtStart = cloneTaskProgress(currentTaskProgress());
+  const editVersionAtStart = progressEditVersion;
   try {
-    const progress = await invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" });
-    done = new Set(ids(progress.task_ids || progress.taskIds).map(key));
-    started = new Set(ids(progress.started_ids || progress.startedIds).map(key));
-    failed = new Set(ids(progress.failed_ids || progress.failedIds).map(key));
-    objectives = Array.isArray(progress.objective_dones) ? progress.objective_dones as { task_id: string; objective_id: string }[] : [];
+    const progress = await serializeTaskProgress(async () => {
+      if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return null;
+      const raw = await invoke<Record<string, unknown>>("site_get", {
+        path: taskProgressPath(mode),
+      });
+      if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return null;
+      return readTaskProgress(raw);
+    });
+    if (
+      !progress ||
+      generation !== taskPageGeneration ||
+      !taskProgressAccountEpochIsCurrent(accountEpoch) ||
+      mode !== progressMode ||
+      !document.querySelector("#task-board")
+    )
+      return;
+    progressBaseline = cloneTaskProgress(progress);
+    if (editVersionAtStart === progressEditVersion) {
+      applyTaskProgress(progress);
+    } else {
+      const reconciled = mergeTaskProgress(localAtStart, progress, currentTaskProgress()).progress;
+      applyTaskProgress(reconciled);
+      if (mergeTaskProgress(progress, reconciled, progress).applied) void saveProgress(false, mode);
+    }
     paint({ keepScroll: true });
+    progressSavedWatch?.(mode);
   } catch {
     /* 同步后的刷新失败时保留屏幕上的进度 */
   }
-}
-
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
 }
 
 function readQuest(value: Record<string, unknown>): Quest | null {
@@ -1285,83 +1565,182 @@ function readQuest(value: Record<string, unknown>): Quest | null {
   };
 }
 
-let questQueue: Promise<void> = Promise.resolve();
-
-export function applyLoggedQuest(kind: "started" | "failed" | "completed", taskId: string) {
+export function applyLoggedQuest(
+  kind: "started" | "failed" | "completed",
+  taskId: string,
+  context?: { accountEpoch?: number; mode?: TaskGameMode },
+) {
   const id = taskId.trim().toLowerCase();
-  if (!id) return questQueue;
-  questQueue = questQueue.then(() => writeLoggedQuest(kind, id)).catch(() => undefined);
-  return questQueue;
+  if (!id) return Promise.resolve(null);
+  const accountEpoch = context?.accountEpoch ?? currentTaskProgressAccountEpoch();
+  const mode = context?.mode ?? gameMode();
+  if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return Promise.resolve(null);
+  return serializeTaskProgress(async () => {
+    if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return false;
+    return writeLoggedQuest(kind, id, mode, accountEpoch);
+  })
+    .then((applied) => (applied && taskProgressAccountEpochIsCurrent(accountEpoch) ? mode : null))
+    .catch(() => null);
 }
 
-async function writeLoggedQuest(kind: "started" | "failed" | "completed", id: string) {
-  const progress = await invoke<Record<string, unknown>>("site_get", { path: "/guides/tarkov/task-dones" });
-  const nextDone = new Set(ids(progress.task_ids || progress.taskIds).map(key));
-  const nextStarted = new Set(ids(progress.started_ids || progress.startedIds).map(key));
-  const nextFailed = new Set(ids(progress.failed_ids || progress.failedIds).map(key));
-  nextDone.delete(id);
-  nextStarted.delete(id);
-  nextFailed.delete(id);
+async function writeLoggedQuest(
+  kind: "started" | "failed" | "completed",
+  id: string,
+  mode: TaskGameMode,
+  accountEpoch: number,
+) {
+  if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return false;
+  const usePageState = mode === progressMode && quests.length > 0;
+  const localAtStart = usePageState ? cloneTaskProgress(currentTaskProgress()) : null;
+  const editVersionAtStart = progressEditVersion;
+  const baseline = usePageState ? cloneTaskProgress(progressBaseline) : null;
+  const raw = await invoke<Record<string, unknown>>("site_get", { path: taskProgressPath(mode) });
+  if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return false;
+  const latest = readTaskProgress(raw);
+  const proposed =
+    baseline && localAtStart
+      ? mergeTaskProgress(baseline, localAtStart, latest).progress
+      : cloneTaskProgress(latest);
+  proposed.done.delete(id);
+  proposed.started.delete(id);
+  proposed.failed.delete(id);
   if (kind === "completed") {
-    nextDone.add(id);
-    const quest = quests.find((item) => key(item.id) === id);
-    for (const parent of quest?.prereq || []) nextDone.add(key(parent));
+    proposed.done.add(id);
+    const quest = mode === progressMode ? quests.find((item) => key(item.id) === id) : undefined;
+    for (const parent of quest?.prereq || []) proposed.done.add(key(parent));
     for (const other of quest?.mutex || []) {
       const otherId = key(other);
-      if (!nextDone.has(otherId)) nextFailed.add(otherId);
+      if (!proposed.done.has(otherId)) proposed.failed.add(otherId);
     }
-  } else if (kind === "failed") nextFailed.add(id);
-  else nextStarted.add(id);
-  for (const item of nextDone) {
-    nextStarted.delete(item);
-    nextFailed.delete(item);
+  } else if (kind === "failed") proposed.failed.add(id);
+  else proposed.started.add(id);
+  for (const item of new Set([...proposed.done, ...proposed.started, ...proposed.failed])) {
+    if (proposed.done.has(item)) {
+      proposed.started.delete(item);
+      proposed.failed.delete(item);
+    } else if (proposed.failed.has(item)) {
+      proposed.started.delete(item);
+    }
   }
-  await invoke("site_put", {
-    path: "/guides/tarkov/task-dones",
-    body: {
-      task_ids: [...nextDone],
-      started_ids: [...nextStarted],
-      failed_ids: [...nextFailed],
-      objective_dones: Array.isArray(progress.objective_dones) ? progress.objective_dones : [],
-      replace: true,
-    },
-  });
-  if (quests.length) {
-    done = nextDone;
-    started = nextStarted;
-    failed = nextFailed;
+  const merged = mergeTaskProgress(latest, proposed, latest);
+  if (merged.applied) {
+    if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return false;
+    await invoke("site_put", {
+      path: taskProgressPath(mode),
+      body: taskProgressBody(merged.progress),
+    });
+    if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return false;
+  }
+  if (!taskProgressAccountEpochIsCurrent(accountEpoch)) return false;
+  if (usePageState && mode === progressMode && localAtStart) {
+    progressBaseline = cloneTaskProgress(merged.progress);
+    if (editVersionAtStart === progressEditVersion) {
+      applyTaskProgress(merged.progress);
+    } else {
+      const reconciled = mergeTaskProgress(
+        localAtStart,
+        merged.progress,
+        currentTaskProgress(),
+      ).progress;
+      applyTaskProgress(reconciled);
+      if (mergeTaskProgress(merged.progress, reconciled, merged.progress).applied) {
+        void saveProgress(false, mode);
+      }
+    }
     if (shellReady) paint({ keepScroll: true });
   }
+  return true;
 }
 
-async function saveProgress(stamp: boolean) {
-  if (saving) return;
+async function saveProgress(stamp: boolean, mode: TaskGameMode = progressMode) {
+  const accountEpoch = currentTaskProgressAccountEpoch();
+  const saveGeneration = progressSaveGeneration;
+  const isCurrentSave = () =>
+    saveGeneration === progressSaveGeneration && taskProgressAccountEpochIsCurrent(accountEpoch);
+  if (saving && savingAccountEpoch === accountEpoch) {
+    if (savingMode === mode) {
+      saveAgain = true;
+      saveAgainStamp ||= stamp;
+    } else {
+      deferredSaveMode = mode;
+      deferredSaveStamp ||= stamp;
+    }
+    return;
+  }
   saving = true;
+  savingMode = mode;
+  savingAccountEpoch = accountEpoch;
+  let saved = false;
   if (shellReady) paint({ keepScroll: true });
   try {
-    await invoke("site_put", {
-      path: "/guides/tarkov/task-dones",
-      body: {
-        task_ids: [...done],
-        started_ids: [...started],
-        failed_ids: [...failed],
-        objective_dones: objectives,
-        replace: true,
-      },
-    });
-    if (stamp) stampSync(true);
+    let stampNext = stamp;
+    do {
+      if (!isCurrentSave() || mode !== progressMode) break;
+      saveAgain = false;
+      const result = await serializeTaskProgress(async () => {
+        if (!isCurrentSave() || mode !== progressMode) return null;
+        const localAtStart = cloneTaskProgress(currentTaskProgress());
+        const editVersionAtStart = progressEditVersion;
+        const baseline = cloneTaskProgress(progressBaseline);
+        const raw = await invoke<Record<string, unknown>>("site_get", {
+          path: taskProgressPath(mode),
+        });
+        if (!isCurrentSave() || mode !== progressMode) return null;
+        const latest = readTaskProgress(raw);
+        const merged = mergeTaskProgress(baseline, localAtStart, latest);
+        if (merged.applied) {
+          if (!isCurrentSave() || mode !== progressMode) return null;
+          await invoke("site_put", {
+            path: taskProgressPath(mode),
+            body: taskProgressBody(merged.progress),
+          });
+          if (!isCurrentSave()) return null;
+        }
+        return { localAtStart, editVersionAtStart, progress: merged.progress };
+      });
+      if (!isCurrentSave() || mode !== progressMode || !result) break;
+      saved = true;
+      progressBaseline = cloneTaskProgress(result.progress);
+      if (result.editVersionAtStart === progressEditVersion) {
+        applyTaskProgress(result.progress);
+      } else {
+        applyTaskProgress(
+          mergeTaskProgress(result.localAtStart, result.progress, currentTaskProgress()).progress,
+        );
+        saveAgain = true;
+      }
+      if (stampNext) stampSync(true, mode);
+      stampNext = saveAgainStamp;
+      saveAgainStamp = false;
+    } while (saveAgain && isCurrentSave() && mode === progressMode);
   } catch (error) {
-    const node = document.querySelector("#path-note");
-    if (node) node.textContent = error instanceof Error ? error.message : "保存任务进度失败";
+    if (isCurrentSave()) {
+      const node = document.querySelector("#path-note");
+      if (node) node.textContent = error instanceof Error ? error.message : "保存任务进度失败";
+    }
   } finally {
-    saving = false;
-    if (shellReady) paint({ keepScroll: true });
+    if (isCurrentSave() && savingAccountEpoch === accountEpoch) {
+      saving = false;
+      savingMode = null;
+      savingAccountEpoch = null;
+      if (shellReady) paint({ keepScroll: true });
+      const nextMode = deferredSaveMode;
+      const nextStamp = deferredSaveStamp;
+      deferredSaveMode = null;
+      deferredSaveStamp = false;
+      saveAgain = false;
+      saveAgainStamp = false;
+      if (saved && mode === progressMode) progressSavedWatch?.(mode);
+      if (nextMode && nextMode === progressMode) void saveProgress(nextStamp, nextMode);
+    }
   }
 }
 
 export function onTaskEvent(target: Element) {
-  if (!document.querySelector("#task-page")?.contains(target) && !target.closest("#task-pop")) return false;
-  if (target.closest("#log-sync, #log-sync-box, [data-sync], #log-sync-go, #log-sync-cancel")) return false;
+  if (!document.querySelector("#task-page")?.contains(target) && !target.closest("#task-pop"))
+    return false;
+  if (target.closest("#log-sync, #log-sync-box, [data-sync], #log-sync-go, #log-sync-cancel"))
+    return false;
   if (target.closest("[data-wiki], select, option")) return false;
   const jump = target.closest<HTMLElement>("[data-flow-jump]");
   if (jump?.dataset.flowJump) {
@@ -1378,7 +1757,11 @@ export function onTaskEvent(target: Element) {
   const mode = target.closest<HTMLButtonElement>("[data-task-view]");
   if (mode?.dataset.taskView === "list" || mode?.dataset.taskView === "tree") {
     view = mode.dataset.taskView;
-    try { localStorage.setItem(VIEW_KEY, view); } catch { /* 忽略 */ }
+    try {
+      localStorage.setItem(VIEW_KEY, view);
+    } catch {
+      /* 忽略 */
+    }
     paint();
     return true;
   }
@@ -1412,6 +1795,7 @@ export function onTaskChange(target: EventTarget | null) {
   done = new Set(updated.done);
   started = new Set(updated.started);
   failed = new Set(updated.failed);
+  progressEditVersion += 1;
   void saveProgress(false);
   return true;
 }

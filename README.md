@@ -1,5 +1,7 @@
 # 战鸽助手
 
+架构边界、数据安全不变量和验证流程见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+
 Windows 桌面助手，登录 [战鸽](https://zhange.space) 账号后使用。主菜单有战鸽酒馆和逃离塔科夫。
 
 塔科夫里可以综合搜索，也可以看联机大厅、实时地图、物品图鉴、弹药对照、Boss、藏身处、枪匠工作台、钥匙、任务和日志监控。商人从综合搜索或任务页进入。实时地图和任务管理可以开私人房间，和队友同步任务进度、任务目标，以及战局里的位置。选图页点一张图，只切换自己正在看的地图；卡片下面是正在这张图里的人，匹配中和观战中会另外标出，三狗最近的出没点也标在对应地图上。联机大厅按成员列出房间，能看到每个人的地图，以及战局中、匹配中、观战中或大厅中。加入房间时按钮会变成「加入中」，避免连点；请求太久没有返回会停下来并提示，而不是一直转圈。还没选地图、而且只有自己一个人的房间，离开选图页或打开大厅时会自动退出。
@@ -18,21 +20,24 @@ Windows 桌面助手，登录 [战鸽](https://zhange.space) 账号后使用。�
 
 界面字体随程序打包：中文用 Noto Sans SC，英文和数字用 IBM Plex Sans，等宽用 IBM Plex Mono。
 
+Tarkov 页面与 `zhange-stats` 共用 [`zhange-base`](https://github.com/739790797/zhange-base) 中的视觉基础。首次克隆使用 `git clone --recurse-submodules`，已有检出运行 `git submodule update --init --recursive`，然后在本仓库运行 `npm ci`。子模块提交指针固定共享代码版本；App 保留自己的页面布局、交互和业务逻辑。
+
 配置写在 `%APPDATA%\space.zhange.app\`：
 
-| 文件 | 内容 |
-| --- | --- |
-| `session.json` | 登录会话 |
-| `paths.json` | 截图目录、日志目录 |
-| `overlay.json` | 地图覆盖层 |
-| `miaomiao.json` | 视觉方案和健身延迟 |
-| `shot.json` | 截图同步、截图按键、自动截图、旧图清理 |
+| 文件            | 内容                                   |
+| --------------- | -------------------------------------- |
+| `session.json`  | 登录会话                               |
+| `paths.json`    | 截图目录、日志目录                     |
+| `overlay.json`  | 地图覆盖层                             |
+| `miaomiao.json` | 视觉方案和健身延迟                     |
+| `shot.json`     | 截图同步、截图按键、自动截图、旧图清理 |
 
 ```bash
-npm install
+npm ci
+npm test
 npm run tauri dev
 ```
 
 也可以双击 `start.bat`。
 
-推送 `v*` 标签后，GitHub Actions 会打出一份 32 位的 `zhange-app.exe`，并挂到同名 Release。这份程序在 32 位 Windows 上直接运行，在 64 位 Windows 上由系统的 32 位兼容层运行。在 Actions 页手动运行 `build` 时，用 `src-tauri/tauri.conf.json` 里的版本号发布。
+推送 `v*` 标签后，GitHub Actions 会打出一份 32 位的 `zhange-app.exe`，并挂到同名 Release。这份程序在 32 位 Windows 上直接运行，在 64 位 Windows 上由系统的 32 位兼容层运行。发布标签必须与 `src-tauri/tauri.conf.json` 中的版本号一致（例如配置为 `0.6.0` 时使用 `v0.6.0`）。在 Actions 页手动发布时，请选择对应的版本标签；从分支手动运行只生成构建产物，不发布 Release。

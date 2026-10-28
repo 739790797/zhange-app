@@ -1,3 +1,4 @@
+import { invoke } from "./tauriBridge";
 export type KindFlags = Record<string, boolean>;
 
 export type AccountMapFilters = {
@@ -64,7 +65,8 @@ function kindFlags(raw: unknown): KindFlags {
 }
 
 export function normalizeAccountMapFilters(raw: unknown): AccountMapFilters {
-  const row = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const row =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const base = defaultAccountMapFilters();
   const floors: Record<string, string> = {};
   if (row.floorsByMap && typeof row.floorsByMap === "object" && !Array.isArray(row.floorsByMap)) {
@@ -73,13 +75,25 @@ export function normalizeAccountMapFilters(raw: unknown): AccountMapFilters {
     }
   }
   const collapsed: Record<string, boolean> = {};
-  if (row.filterGroupsCollapsed && typeof row.filterGroupsCollapsed === "object" && !Array.isArray(row.filterGroupsCollapsed)) {
-    for (const [key, value] of Object.entries(row.filterGroupsCollapsed as Record<string, unknown>)) {
+  if (
+    row.filterGroupsCollapsed &&
+    typeof row.filterGroupsCollapsed === "object" &&
+    !Array.isArray(row.filterGroupsCollapsed)
+  ) {
+    for (const [key, value] of Object.entries(
+      row.filterGroupsCollapsed as Record<string, unknown>,
+    )) {
       if (value === true) collapsed[key] = true;
     }
   }
-  const extracts = row.extractKinds && typeof row.extractKinds === "object" ? row.extractKinds as Record<string, unknown> : {};
-  const spawns = row.spawnKinds && typeof row.spawnKinds === "object" ? row.spawnKinds as Record<string, unknown> : {};
+  const extracts =
+    row.extractKinds && typeof row.extractKinds === "object"
+      ? (row.extractKinds as Record<string, unknown>)
+      : {};
+  const spawns =
+    row.spawnKinds && typeof row.spawnKinds === "object"
+      ? (row.spawnKinds as Record<string, unknown>)
+      : {};
   return {
     ...base,
     style: row.style === "tile" ? "tile" : "svg",
@@ -135,14 +149,22 @@ function readLegacy() {
   try {
     const raw = sessionStorage.getItem(LEGACY_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { off?: string[]; style?: string; floor?: string; collapsed?: string[] };
+    const parsed = JSON.parse(raw) as {
+      off?: string[];
+      style?: string;
+      floor?: string;
+      collapsed?: string[];
+    };
     return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
     return null;
   }
 }
 
-function legacyAccount(raw: { off?: string[]; style?: string; floor?: string; collapsed?: string[] }, mapKey: string) {
+function legacyAccount(
+  raw: { off?: string[]; style?: string; floor?: string; collapsed?: string[] },
+  mapKey: string,
+) {
   const next = defaultAccountMapFilters();
   next.style = raw.style === "svg" ? "svg" : "tile";
   const off = new Set(raw.off || []);
@@ -180,12 +202,6 @@ function legacyAccount(raw: { off?: string[]; style?: string; floor?: string; co
   return next;
 }
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
-
 export function currentAccount() {
   return account;
 }
@@ -213,9 +229,14 @@ export function layerVisible(key: string) {
     const kind = key.slice("spawns:".length) as keyof AccountMapFilters["spawnKinds"];
     return account.spawnKinds[kind] !== false;
   }
-  if (key.startsWith("hazards:")) return account.showHazards && account.hazardKinds[key.slice("hazards:".length)] !== false;
-  if (key.startsWith("loot:")) return account.showLootContainers && account.lootContainerKinds[key.slice("loot:".length)] === true;
-  if (key.startsWith("loose:")) return account.showLootLoose && account.lootLooseKinds[key.slice("loose:".length)] === true;
+  if (key.startsWith("hazards:"))
+    return account.showHazards && account.hazardKinds[key.slice("hazards:".length)] !== false;
+  if (key.startsWith("loot:"))
+    return (
+      account.showLootContainers && account.lootContainerKinds[key.slice("loot:".length)] === true
+    );
+  if (key.startsWith("loose:"))
+    return account.showLootLoose && account.lootLooseKinds[key.slice("loose:".length)] === true;
   return true;
 }
 
@@ -285,7 +306,9 @@ export function collapsedAppIds() {
 export function floorForMap(mapKey: string, layers?: { name?: string; show?: boolean }[]) {
   const names = (layers || []).map((item) => item.name || "").filter(Boolean);
   if (!mapKey || !Object.prototype.hasOwnProperty.call(account.floorsByMap, mapKey)) {
-    const shown = (layers || []).find((item) => item.show && item.name && names.includes(item.name));
+    const shown = (layers || []).find(
+      (item) => item.show && item.name && names.includes(item.name),
+    );
     return shown?.name || "";
   }
   const saved = account.floorsByMap[mapKey] || "";
@@ -328,7 +351,9 @@ export function scheduleAccountPush() {
   window.clearTimeout(pushTimer);
   pushTimer = window.setTimeout(() => {
     const prefs = copyAccount();
-    void invoke("site_put", { path: "/guides/tarkov/map-filters", body: { prefs } }).catch(() => undefined);
+    void invoke("site_put", { path: "/guides/tarkov/map-filters", body: { prefs } }).catch(
+      () => undefined,
+    );
   }, 400);
 }
 
@@ -345,7 +370,9 @@ export function ensureAccountFilters(mapKey = "") {
 async function pullAccount(hadCache: boolean, mapKey: string) {
   const seen = revision;
   try {
-    const row = await invoke<{ saved?: boolean; prefs?: unknown }>("site_get", { path: "/guides/tarkov/map-filters" });
+    const row = await invoke<{ saved?: boolean; prefs?: unknown }>("site_get", {
+      path: "/guides/tarkov/map-filters",
+    });
     if (dirty || preferLocal || seen !== revision) {
       preferLocal = false;
       pushEnabled = true;

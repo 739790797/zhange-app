@@ -1,36 +1,148 @@
-import "./fonts.css";
+import { invoke } from "./tauriBridge";
+import "@zhange-base/src/index.css";
 import { listen } from "@tauri-apps/api/event";
-import { closeLogSync, logSyncBusy, openLogSync, pickLogSyncRange, runLogSync } from "./logSync";
-import { applyRoomClaims, clearMapTasks, closeMapSummary, mapQuestProgress, mountMapTasks, onMapObjectiveChange, onMapTaskChange, onMapTaskClick, onMapTaskInput, openMapGuide, openMapSummary, patchLoggedQuest, setMapHighlight, setMapObjective, watchMapTasks } from "./mapTasks";
-import { applyLoggedQuest, mountTaskPage, onTaskChange, onTaskEvent, taskPageShell } from "./taskFlow";
-import { bindQuestActions, bindQuestHighlight, destroyLiveMap, invalidateLiveMap, locateQuest, mountLiveMap, onQuestFilterClick, setLayerVisible, setMapFloor, setMapStyle, setQuestRoom, toggleFold } from "./liveMap";
-import { ammoShell, mountAmmo } from "./ammoChart";
-import { bossShell, mountBosses } from "./bossList";
-import { hideoutShell, mountHideout, openHideoutList } from "./hideout";
-import { keyShell, mountKeys, openKeyList } from "./keys";
+import {
+  cancelLogSyncForAccountChange,
+  closeLogSync,
+  logSyncBusy,
+  openLogSync,
+  pickLogSyncRange,
+  runLogSync,
+} from "./logSync";
+import { createRouteLoadGuard } from "./routeLoadGuard";
+import {
+  applyRoomClaims,
+  clearMapTasks,
+  closeMapSummary,
+  mapQuestProgress,
+  mountMapTasks,
+  onMapObjectiveChange,
+  onMapTaskChange,
+  onMapTaskClick,
+  onMapTaskInput,
+  openMapGuide,
+  openMapSummary,
+  patchLoggedQuest,
+  setMapHighlight,
+  setMapObjective,
+  watchMapTasks,
+} from "./mapTasks";
+import {
+  applyLoggedQuest,
+  mountTaskPage,
+  onTaskChange,
+  onTaskEvent,
+  resetTaskProgressForAccountChange,
+  taskPageShell,
+  watchTaskProgressSaved,
+} from "./taskFlow";
+import {
+  bindQuestActions,
+  bindQuestHighlight,
+  destroyLiveMap,
+  invalidateLiveMap,
+  locateQuest,
+  mountLiveMap,
+  onQuestFilterClick,
+  setLayerVisible,
+  setMapFloor,
+  setMapStyle,
+  setQuestRoom,
+  toggleFold,
+} from "./liveMap";
+import type { RouteLoadTicket } from "./routeLoadGuard";
 import { paintGoonBars, startGoonWatch } from "./goon";
 import { findMap, mapTitle, sameMap } from "./mapNames";
-import { applyRoomSync, clearMapPresence, loadMapBoard, mapBoardHtml, mapBoardReady, noteLocalPhase, paintMapPickGoon, refreshMapBoard, resetMapBoard, setLocalWatch } from "./mapPicker";
-import { closeLobbyDialog, lobbyShell, mountLobby, setLobbyNote, setLobbyRoomKeep, settleLobbyJoin } from "./lobby";
-import { mountWorkbench, workbenchShell } from "./workbench";
-import { catalogShell, matchCatalog, mountCatalog, pinCatalogList } from "./itemCatalog";
+import {
+  applyRoomSync,
+  clearMapPresence,
+  loadMapBoard,
+  mapBoardHtml,
+  mapBoardReady,
+  noteLocalPhase,
+  paintMapPickGoon,
+  refreshMapBoard,
+  resetMapBoard,
+  retryMapBoard,
+  setLocalViewMap,
+  setLocalWatch,
+  syncMapRoomTaskProgress,
+} from "./mapPicker";
+import {
+  closeLobbyDialog,
+  lobbyShell,
+  mountLobby,
+  setLobbyNote,
+  setLobbyRoomKeep,
+  settleLobbyJoin,
+} from "./lobby";
 import { fadeIn, fadeOut } from "./motion";
 import { isPending, spin } from "./spinner";
-import { matchWiki, mountWiki, readWikiHits, wikiHref, wikiShell, type WikiHit } from "./wiki";
-import { bootOverlayShell, ensureOverlayState, onOverlayChange, onOverlayClick, onOverlayInput, onOverlayKey, overlayCardHtml, overlayDialogHtml, publishOverlayMap, watchOverlayTyping } from "./overlay";
-import { backNav, bindHistory, forwardNav, paintHistoryButtons, pushNav, replaceNav, syncNav } from "./navHistory";
-import { shotHotkeyLabel, startPlayerSync } from "./playerFix";
-import { mountTavernArticle, mountTavernList, setTavernReply, submitTavernComment, tavernArticleHtml, tavernCategoryHref, tavernListHtml, tavernMatch, tavernPageHref, tavernSearchHref } from "./tavern";
+import { matchWiki, readWikiHits, wikiHref, type WikiHit } from "./wikiRoute";
+import {
+  bootOverlayShell,
+  ensureOverlayState,
+  onOverlayChange,
+  onOverlayClick,
+  onOverlayInput,
+  onOverlayKey,
+  overlayCardHtml,
+  overlayDialogHtml,
+  overlayView,
+  publishOverlayMap,
+  watchOverlayTyping,
+} from "./overlay";
+import {
+  backNav,
+  bindHistory,
+  forwardNav,
+  paintHistoryButtons,
+  pushNav,
+  replaceNav,
+  syncNav,
+} from "./navHistory";
+import { clearRoomPresence, setPlayerRoomId, shotHotkeyLabel, startPlayerSync } from "./playerFix";
+import {
+  mountTavernArticle,
+  mountTavernList,
+  setTavernReply,
+  submitTavernComment,
+  tavernArticleHtml,
+  tavernCategoryHref,
+  tavernListHtml,
+  tavernMatch,
+  tavernPageHref,
+  tavernSearchHref,
+} from "./tavern";
+import { decodePathname } from "./routePath";
+import {
+  currentTaskProgressAccountEpoch,
+  invalidateTaskProgressAccount,
+  taskProgressAccountEpochIsCurrent,
+} from "./taskProgressQueue";
+import { normalizeRoomIdentity, sameRoomIdentity } from "./roomIdentity";
 
 watchMapTasks(
-  () => { void syncQuestClaims(); },
-  (id, on) => { void toggleClaim(id, on); },
-  (id) => { void locateQuest(id); },
-  (taskId, objectiveId, done) => { void markQuestObjective(taskId, objectiveId, done); },
+  () => {
+    void syncQuestClaims();
+    syncMapRoomTaskProgress();
+  },
+  (id, on) => {
+    void toggleClaim(id, on);
+  },
+  (id) => {
+    void locateQuest(id);
+  },
+  (taskId, objectiveId, done) => {
+    void markQuestObjective(taskId, objectiveId, done);
+  },
 );
+watchTaskProgressSaved((mode) => syncMapRoomTaskProgress(mode));
 bindQuestActions(
   (id) => openMapGuide(id),
-  (taskId, objectiveId, done) => { void markQuestObjective(taskId, objectiveId, done); },
+  (taskId, objectiveId, done) => {
+    void markQuestObjective(taskId, objectiveId, done);
+  },
 );
 bindQuestHighlight((id) => setMapHighlight(id));
 
@@ -69,18 +181,40 @@ type RoomDetail = {
   claims: RoomClaim[];
   objectives: RoomObjective[];
 };
-type RoomState = { slug: string; id: string; status: string; error: string; password: string; detail: RoomDetail | null };
+type RoomState = {
+  slug: string;
+  id: string;
+  status: string;
+  error: string;
+  password: string;
+  detail: RoomDetail | null;
+};
 
-const sections = ["综合搜索", "联机大厅", "实时地图", "物品图鉴", "弹药对照", "Boss", "藏身处", "枪匠工作台", "钥匙管理", "任务管理", "妙妙工具", "日志监控"] as const;
+const sections = [
+  "综合搜索",
+  "联机大厅",
+  "实时地图",
+  "物品图鉴",
+  "弹药对照",
+  "Boss",
+  "藏身处",
+  "枪匠工作台",
+  "钥匙管理",
+  "任务管理",
+  "妙妙工具",
+  "日志监控",
+] as const;
 let maps: MapItem[] = [];
 let mapsNote = "";
 let mapsLoading = false;
 let mapsLoaded = false;
+let mapsRequestSeq = 0;
 let room: RoomState = { slug: "", id: "", status: "", error: "", password: "", detail: null };
 let roomSeq = 0;
 let roomPending = false;
 let roomTimer = 0;
 let roomLive = false;
+let roomConnectionRevision = 0;
 let socketRoomId = "";
 let accountPhaseSig = "";
 let accountPhaseReady = false;
@@ -88,6 +222,23 @@ let accountViewSlug = "";
 let viewerName = "";
 let viewerId = 0;
 let claimSeedKey = "";
+let roomEpoch = 0;
+let roomDetailRevision = 0;
+let roomMapSequence = 0;
+let roomViewSequence = 0;
+let roomWatchRequest = 0;
+let roomSocketGeneration = 0;
+let roomWatchPromise: Promise<number> | null = null;
+const pendingRoomSyncEvents: Record<string, unknown>[] = [];
+let roomWriteQueue: Promise<void> = Promise.resolve();
+let pendingRoomView: {
+  id: string;
+  epoch: number;
+  sequence: number;
+  slug: string;
+  sentConnection: number;
+  retryAttempt: number;
+} | null = null;
 let lastMapSlug = "";
 let gameInRaid = false;
 let gameMapSlug = "";
@@ -96,10 +247,70 @@ let spectating = false;
 let ignoredRoomId = "";
 let mapPage: HTMLElement | null = null;
 let usageTimer = 0;
-let gameMode: "pvp" | "pve" = localStorage.getItem("zhange.guides.tarkov.gameMode") === "pve" ? "pve" : "pvp";
+let gameMode: "pvp" | "pve" =
+  localStorage.getItem("zhange.guides.tarkov.gameMode") === "pve" ? "pve" : "pvp";
+const pageLoadGuard = createRouteLoadGuard();
+
+function resetTaskProgressAccountState() {
+  invalidateTaskProgressAccount();
+  cancelLogSyncForAccountChange();
+  resetTaskProgressForAccountChange();
+  clearMapTasks();
+}
 
 function path() {
-  return decodeURIComponent(location.pathname.replace(/\/+$/, "") || "/");
+  return decodePathname(location.pathname);
+}
+
+function routeKey() {
+  return `${location.pathname}${location.search}`;
+}
+
+function loadPageModule<T>(
+  ticket: RouteLoadTicket,
+  importer: () => Promise<T>,
+  install: (module: T) => void,
+  hostSelector: string,
+  failureMessage: string,
+) {
+  void pageLoadGuard.load(
+    ticket,
+    routeKey,
+    importer,
+    (module) => {
+      install(module);
+      paintHistoryButtons();
+    },
+    () => {
+      const host = root.querySelector<HTMLElement>(hostSelector);
+      if (host) host.innerHTML = `<p role="alert">${failureMessage}</p>`;
+    },
+  );
+}
+
+function handleLoadedListLink<T>(
+  href: string,
+  routeBase: string,
+  hostSelector: string,
+  importer: () => Promise<T>,
+  open: (module: T, href: string) => boolean,
+) {
+  if (
+    !document.querySelector(hostSelector) ||
+    (href !== routeBase && !href.startsWith(`${routeBase}/`))
+  )
+    return false;
+  const expectedRoute = routeKey();
+  void importer().then(
+    (module) => {
+      if (routeKey() !== expectedRoute) return;
+      if (!open(module, href)) go(href);
+    },
+    () => {
+      if (routeKey() === expectedRoute) go(href);
+    },
+  );
+  return true;
 }
 
 function go(next: string) {
@@ -126,21 +337,22 @@ function reasonText(reason: unknown) {
   return "登录失败，请使用战鸽网站的账号和密码";
 }
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
-  if (!internals?.invoke) throw new Error("请在战鸽助手窗口里操作");
-  return internals.invoke(command, args);
-}
-
 async function loggedIn() {
   try {
     const user = await invoke<{ loggedIn: boolean; username?: string }>("site_session");
     viewerName = user.username || "";
     if (user.loggedIn) {
-      const me = await invoke<{ id?: number; display_name?: string; username?: string }>("site_get", { path: "/auth/me" }).catch(() => null);
+      const me = await invoke<{ id?: number; display_name?: string; username?: string }>(
+        "site_get",
+        { path: "/auth/me" },
+      ).catch(() => null);
       viewerId = Number(me?.id || 0);
       if (me?.display_name) viewerName = me.display_name;
       else if (me?.username) viewerName = me.username;
+      const current = await invoke<{ loggedIn: boolean }>("site_session").catch(() => ({
+        loggedIn: false,
+      }));
+      return current.loggedIn;
     }
     return user.loggedIn;
   } catch {
@@ -150,7 +362,11 @@ async function loggedIn() {
 
 function crumbs(items: { label: string; href?: string }[]) {
   return `<nav class="crumbs">${items
-    .map((item) => item.href ? `<a href="${item.href}" data-link>/${item.label}</a>` : `<span>/${item.label}</span>`)
+    .map((item) =>
+      item.href
+        ? `<a href="${esc(item.href)}" data-link>/${esc(item.label)}</a>`
+        : `<span>/${esc(item.label)}</span>`,
+    )
     .join("")}</nav>`;
 }
 
@@ -160,7 +376,10 @@ function mapCard(map: MapItem) {
 }
 
 function mapMenuHtml() {
-  if (!maps.length) return isPending(mapsNote || "正在读取地图") ? spin("正在读取地图", true) : `<p>${esc(mapsNote)}</p>`;
+  if (!maps.length)
+    return isPending(mapsNote || "正在读取地图")
+      ? spin("正在读取地图", true)
+      : `<p>${esc(mapsNote)}</p>`;
   return maps.map(mapCard).join("");
 }
 
@@ -171,8 +390,13 @@ function fillMapMenu() {
 }
 
 function topNav(active: string) {
-  const buttons = sections.map((name) => `<button type="button" data-section="${name}" class="${active === name ? "on" : ""}">${name}</button>`).join("");
-  return `<header class="topnav">${historyButtons()}${buttons}<div class="mode-switch" role="group" aria-label="游戏模式"><button type="button" data-mode="pvp" class="${gameMode === "pvp" ? "on" : ""}" title="在线对战（PVP）">PVP</button><button type="button" data-mode="pve" class="${gameMode === "pve" ? "on" : ""}" title="合作模式（PVE）">PVE</button></div></header>`;
+  const buttons = sections
+    .map(
+      (name) =>
+        `<button type="button" data-section="${name}" class="${active === name ? "on" : ""}">${name}</button>`,
+    )
+    .join("");
+  return `<header class="topnav">${historyButtons()}${buttons}<div class="mode-switch zhange-segmented-control" role="group" aria-label="游戏模式"><button type="button" data-mode="pvp" class="zhange-button" aria-pressed="${gameMode === "pvp"}" title="在线对战（PVP）">PVP</button><button type="button" data-mode="pve" class="zhange-button" aria-pressed="${gameMode === "pve"}" title="合作模式（PVE）">PVE</button></div></header>`;
 }
 
 function loginView() {
@@ -232,16 +456,24 @@ function searchView() {
 }
 
 function searchResultsHtml() {
-  return searchRows.map((section) => `
+  return searchRows
+    .map(
+      (section) => `
     <section>
       <h2>${esc(section.label)}</h2>
-      ${section.rows.map((row) => `
+      ${section.rows
+        .map(
+          (row) => `
         <button type="button" class="search-hit" ${row.mapSlug ? `data-search-map="${esc(row.mapSlug)}"` : row.kind && row.id ? `data-wiki="${row.kind}" data-wiki-id="${esc(row.id)}"` : "data-search-closed"}>
           ${row.icon ? `<img src="${esc(row.icon)}" alt="" />` : ""}
           <strong>${esc(row.name)}</strong>
           ${row.extra ? `<span>${esc(row.extra)}</span>` : ""}
-        </button>`).join("")}
-    </section>`).join("");
+        </button>`,
+        )
+        .join("")}
+    </section>`,
+    )
+    .join("");
 }
 
 function paintSearch() {
@@ -257,7 +489,16 @@ function localMapRows(query: string): SearchRow[] {
   return maps.flatMap((map) => {
     const hay = `${map.name} ${map.english} ${map.slug}`.toLowerCase();
     if (!hay.includes(needle)) return [];
-    return [{ name: map.name, extra: map.english, mapSlug: map.slug, kind: "", id: "", icon: map.thumbLink }];
+    return [
+      {
+        name: map.name,
+        extra: map.english,
+        mapSlug: map.slug,
+        kind: "",
+        id: "",
+        icon: map.thumbLink,
+      },
+    ];
   });
 }
 
@@ -275,22 +516,33 @@ async function runSearch() {
   searchRows = [];
   paintSearch();
   try {
-    const data = await invoke<{ items?: unknown; tasks?: unknown; traders?: unknown; bosses?: unknown }>("site_get", {
+    const data = await invoke<{
+      items?: unknown;
+      tasks?: unknown;
+      traders?: unknown;
+      bosses?: unknown;
+    }>("site_get", {
       path: `/guides/tarkov/search?q=${encodeURIComponent(query)}`,
     });
-    if ((document.querySelector<HTMLInputElement>("#search-q")?.value || "").trim() !== query) return;
+    if ((document.querySelector<HTMLInputElement>("#search-q")?.value || "").trim() !== query)
+      return;
     const sections = [
       ["地图", localMapRows(query)],
       ["任务", readWikiHits(data.tasks, "task")],
       ["物品", readWikiHits(data.items, "item")],
       ["商人", readWikiHits(data.traders, "trader")],
       ["BOSS", readWikiHits(data.bosses, "boss")],
-    ].filter((section): section is [string, SearchRow[]] => Array.isArray(section[1]) && section[1].length > 0)
+    ]
+      .filter(
+        (section): section is [string, SearchRow[]] =>
+          Array.isArray(section[1]) && section[1].length > 0,
+      )
       .map(([label, rows]) => ({ label, rows }));
     searchRows = sections;
     searchNote = sections.length ? "点开结果查看详情。地图会打开实时地图。" : "没有匹配结果";
   } catch (error) {
-    if ((document.querySelector<HTMLInputElement>("#search-q")?.value || "").trim() !== query) return;
+    if ((document.querySelector<HTMLInputElement>("#search-q")?.value || "").trim() !== query)
+      return;
     searchRows = [];
     searchNote = error instanceof Error ? error.message : "搜索失败";
   }
@@ -303,18 +555,20 @@ function shownMap(slug: string) {
 }
 
 function mapToolIcon(kind: "sidebars" | "full" | "exit") {
-  if (kind === "sidebars") return `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M2.6 3h2.6v10H2.6zM10.8 3H13.4v10h-2.6z"/></svg>`;
+  if (kind === "sidebars")
+    return `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M2.6 3h2.6v10H2.6zM10.8 3H13.4v10h-2.6z"/></svg>`;
   const stroke = `fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`;
-  if (kind === "exit") return `<svg viewBox="0 0 16 16" aria-hidden="true"><path ${stroke} d="M6.2 3v3.2H3M9.8 3v3.2H13M6.2 13v-3.2H3M9.8 13v-3.2H13"/></svg>`;
+  if (kind === "exit")
+    return `<svg viewBox="0 0 16 16" aria-hidden="true"><path ${stroke} d="M6.2 3v3.2H3M9.8 3v3.2H13M6.2 13v-3.2H3M9.8 13v-3.2H13"/></svg>`;
   return `<svg viewBox="0 0 16 16" aria-hidden="true"><path ${stroke} d="M3 6.2V3h3.2M13 6.2V3h-3.2M3 9.8V13h3.2M13 9.8V13h-3.2"/></svg>`;
 }
 
 function mapView(slug: string) {
   const name = shownMap(slug);
-  const image = `<div class="map-viewport" id="map-viewport"><div id="map-root" data-slug="${slug}"></div></div>`;
+  const image = `<div class="map-viewport" id="map-viewport"><div id="map-root" data-slug="${esc(slug)}"></div></div>`;
   const fullscreen = Boolean(document.fullscreenElement);
   return `
-    <section class="map-app tarkov-page">
+    <section class="map-app tarkov-page zhange-theme-tarkov">
       ${image}
       <div class="map-chrome">
         ${crumbs([
@@ -345,7 +599,6 @@ function mapView(slug: string) {
         </section>
         <aside class="overlay left" id="filter-panel" aria-label="地图筛选">
           <header><strong>图层</strong><button type="button" data-collapse="filter">收起</button></header>
-          <div id="place-bar"></div>
           <div class="panel-body" id="filter-body">${spin("正在读取图层")}</div>
         </aside>
       </div>
@@ -377,7 +630,11 @@ function mapView(slug: string) {
 function toolsView() {
   const slider = (id: string, label: string, min: string, max: string, step: string) =>
     `<label class="tool-slider"><span>${label}</span><input id="${id}" type="range" min="${min}" max="${max}" step="${step}" /><strong id="${id}-val"></strong></label>`;
-  const delays = Array.from({ length: 15 }, (_, index) => `<label><span>${index + 1}</span><input data-delay="${index}" inputmode="numeric" /></label>`).join("");
+  const delays = Array.from(
+    { length: 15 },
+    (_, index) =>
+      `<label><span>${index + 1}</span><input data-delay="${index}" inputmode="numeric" /></label>`,
+  ).join("");
   return `
     <section class="tools-page">
       <div class="tools-pair">
@@ -415,6 +672,7 @@ function toolsView() {
             <button type="button" id="fit-reset">恢复默认延迟</button>
           </div>
           <p id="fit-note">状态：就绪</p>
+          <button type="button" id="tools-retry" hidden>重试加载设置</button>
         </article>
       </div>
       <div class="tools-split">
@@ -490,7 +748,9 @@ function sessionClock(value: string) {
 
 function feedHtml(items: LogNote[]) {
   return items.length
-    ? items.map((item) => `<li><time>${esc(item.at)}</time><span>${esc(item.text)}</span></li>`).join("")
+    ? items
+        .map((item) => `<li><time>${esc(item.at)}</time><span>${esc(item.text)}</span></li>`)
+        .join("")
     : `<li class="log-empty"><span>还没有触发</span></li>`;
 }
 
@@ -588,7 +848,8 @@ function sceneSlug(line: string) {
   if (index < 0) return "";
   const rest = line.slice(index + marker.length);
   const lower = rest.toLowerCase();
-  if (lower.includes("hideout") || lower.includes("menu") || lower.includes("empty_preset")) return "";
+  if (lower.includes("hideout") || lower.includes("menu") || lower.includes("empty_preset"))
+    return "";
   const token = rest.trim().split(/\s+/)[0] || "";
   const file = token.split(/[/\\]/).pop() || token;
   const stem = file.split("_preset")[0].replace(/\.bundle$/i, "");
@@ -598,7 +859,13 @@ function sceneSlug(line: string) {
 function fieldValue(line: string, key: string) {
   const index = line.indexOf(key);
   if (index < 0) return "";
-  return line.slice(index + key.length).trim().split(/[,']/)[0]?.trim() || "";
+  return (
+    line
+      .slice(index + key.length)
+      .trim()
+      .split(/[,']/)[0]
+      ?.trim() || ""
+  );
 }
 
 function triggerAction(line: string) {
@@ -610,14 +877,19 @@ function triggerAction(line: string) {
   }
   if (line.includes("scene preset path:")) {
     const lower = line.toLowerCase();
-    if (lower.includes("hideout") || lower.includes("menu") || lower.includes("empty_preset")) return "回到菜单，战局结束";
+    if (lower.includes("hideout") || lower.includes("menu") || lower.includes("empty_preset"))
+      return "回到菜单，战局结束";
     const slug = sceneSlug(line);
     if (slug) return `切到${shownMap(slug)}`;
   }
   if (line.includes("LocationLoaded") && !line.includes("LocationLoadedTime")) return "进入匹配";
   if (line.includes("GameStarting") && !line.includes("GameStarted")) return "战局启动";
   if (line.includes("GameStarted:") && clocked(line)) return "战局开始";
-  if (line.includes("Network game matching aborted") || line.includes("Network game matching cancelled")) return "匹配取消";
+  if (
+    line.includes("Network game matching aborted") ||
+    line.includes("Network game matching cancelled")
+  )
+    return "匹配取消";
   if (line.includes("Got notification | UserMatchOver")) return "战局结束";
   if (line.includes("---> Request") && line.includes("/client/match/local/end")) return "战局结束";
   if (line.includes("TRACE-NetworkGameCreate profileStatus")) {
@@ -640,10 +912,10 @@ function jsonObject(text: string) {
     if (inStr) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
-      else if (ch === "\"") inStr = false;
+      else if (ch === '"') inStr = false;
       continue;
     }
-    if (ch === "\"") inStr = true;
+    if (ch === '"') inStr = true;
     else if (ch === "{") depth += 1;
     else if (ch === "}") {
       depth -= 1;
@@ -658,9 +930,12 @@ function questAction(json: string) {
     const parsed = JSON.parse(json) as { message?: Record<string, unknown> };
     const message = parsed.message || (parsed as Record<string, unknown>);
     const type = Number(message.type ?? message.Type);
-    const label = type === 12 ? "任务完成" : type === 11 ? "任务失败" : type === 10 ? "任务开始" : "";
+    const label =
+      type === 12 ? "任务完成" : type === 11 ? "任务失败" : type === 10 ? "任务开始" : "";
     if (!label) return "";
-    const raw = String(message.templateId || message.TemplateId || message.questId || message.QuestId || "");
+    const raw = String(
+      message.templateId || message.TemplateId || message.questId || message.QuestId || "",
+    );
     const id = raw.trim().split(/\s+/)[0] || "";
     if (!/^[a-f0-9]{20,32}$/i.test(id)) return "";
     return `${label} ${id}`;
@@ -722,11 +997,19 @@ function paintTail(id: string, text: string, ready: boolean) {
   }
   const body = next.endsWith("\n") ? next.slice(0, -1) : next;
   const prevBody = prev.endsWith("\n") ? prev.slice(0, -1) : prev;
-  const grew = Boolean(prevBody && text.trim() && body.startsWith(`${prevBody}\n`) && node.childElementCount > 0);
+  const grew = Boolean(
+    prevBody && text.trim() && body.startsWith(`${prevBody}\n`) && node.childElementCount > 0,
+  );
   if (grew) {
     const extra = body.slice(prevBody.length + 1);
     const actions = lineActions(extra);
-    node.insertAdjacentHTML("beforeend", extra.split("\n").map((line, index) => lineSpan(line, actions[index] || "")).join(""));
+    node.insertAdjacentHTML(
+      "beforeend",
+      extra
+        .split("\n")
+        .map((line, index) => lineSpan(line, actions[index] || ""))
+        .join(""),
+    );
     if (stick) node.scrollTop = node.scrollHeight;
     return;
   }
@@ -745,12 +1028,22 @@ async function refreshLogMonitor() {
   const live = await invoke<LogLive>("log_state").catch(() => null);
   if (!document.querySelector("#log-status") || !live) return;
   const mapName = live.slug ? shownMap(live.slug) : "—";
-  const raid = !live.ready ? "正在读取" : live.inRaid ? "进行中" : live.phase === "raid_exited" || live.phase === "matching_aborted" ? "已结束" : "未开始";
-  const shown = (value: string) => value ? logFileName(value) : "—";
-  const full = (value: string) => value ? baseName(value) : "";
+  const raid = !live.ready
+    ? "正在读取"
+    : live.inRaid
+      ? "进行中"
+      : live.phase === "raid_exited" || live.phase === "matching_aborted"
+        ? "已结束"
+        : "未开始";
+  const shown = (value: string) => (value ? logFileName(value) : "—");
+  const full = (value: string) => (value ? baseName(value) : "");
   const rows: [string, string, string][] = [
     ["游戏", live.running ? "正在运行" : "未检测到", ""],
-    ["启动时间", live.session ? sessionClock(live.session) : "—", live.session ? baseName(live.session) : ""],
+    [
+      "启动时间",
+      live.session ? sessionClock(live.session) : "—",
+      live.session ? baseName(live.session) : "",
+    ],
     ["应用日志", shown(live.application), full(live.application)],
     ["通知日志", shown(live.notices), full(live.notices)],
     ["后端日志", shown(live.backend), full(live.backend)],
@@ -760,7 +1053,12 @@ async function refreshLogMonitor() {
     ["服务器", live.server || (live.inRaid ? "未知" : "—"), ""],
     ["地点", live.location ? shownMap(live.location) : "—", ""],
   ];
-  host.innerHTML = rows.map(([label, value, title]) => `<dt>${esc(label)}</dt><dd title="${esc(title || value)}">${esc(value)}</dd>`).join("");
+  host.innerHTML = rows
+    .map(
+      ([label, value, title]) =>
+        `<dt>${esc(label)}</dt><dd title="${esc(title || value)}">${esc(value)}</dd>`,
+    )
+    .join("");
   if (!live.ready) {
     seenTailStamp = "";
     cachedTails = null;
@@ -789,10 +1087,15 @@ function plainView(title: string, text: string) {
   return `<section class="placeholder"><h1>${title}</h1><p>${text}</p></section>`;
 }
 
-function tarkovFrame(active: string, crumbItems: { label: string; href?: string }[], body: string, mapMode = false) {
+function tarkovFrame(
+  active: string,
+  crumbItems: { label: string; href?: string }[],
+  body: string,
+  mapMode = false,
+) {
   if (mapMode) return body;
   return `
-    <main class="shell tarkov-page">
+    <main class="shell tarkov-page zhange-theme-tarkov">
       ${crumbs(crumbItems)}
       ${topNav(active)}
       <div class="stage">${body}</div>
@@ -803,12 +1106,16 @@ function mapLoadingView(slug: string) {
   const name = shownMap(slug) || "地图";
   const failed = Boolean(room.error);
   const text = room.error || room.status || "正在创建私人房间…";
-  return tarkovFrame("实时地图", [
-    { label: "主菜单", href: "/主菜单" },
-    { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-    { label: "实时地图", href: "/主菜单/逃离塔科夫/实时地图" },
-    { label: name },
-  ], `<section class="map-loading" id="map-loading">${failed || !isPending(text) ? `<p>${esc(text)}</p>` : spin(text)}${failed ? `<button type="button" data-retry-room>重试</button>` : ""}</section>`);
+  return tarkovFrame(
+    "实时地图",
+    [
+      { label: "主菜单", href: "/主菜单" },
+      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+      { label: "实时地图", href: "/主菜单/逃离塔科夫/实时地图" },
+      { label: name },
+    ],
+    `<section class="map-loading" id="map-loading">${failed || !isPending(text) ? `<p>${esc(text)}</p>` : spin(text)}${failed ? `<button type="button" data-retry-room>重试</button>` : ""}</section>`,
+  );
 }
 
 function onMapPicker() {
@@ -818,7 +1125,7 @@ function onMapPicker() {
 function rememberBoardRoom(raw: Record<string, unknown> | null) {
   if (!raw || room.id) return;
   const detail = readDetail(raw);
-  if (!detail || (ignoredRoomId && detail.id === ignoredRoomId)) return;
+  if (!detail || (ignoredRoomId && sameRoomIdentity(detail.id, ignoredRoomId))) return;
   ignoredRoomId = "";
   roomPending = false;
   room = {
@@ -836,21 +1143,42 @@ function renderMapPicker() {
   const body = pending
     ? `<section class="map-loading">${spin(pending)}<p>${esc(pending)}</p></section>`
     : maps.length
-    ? mapBoardHtml(maps)
-    : isPending(mapsNote || "正在读取地图") ? spin("正在读取地图") : plainView("实时地图", esc(mapsNote));
-  return tarkovFrame("实时地图", [
-    { label: "主菜单", href: "/主菜单" },
-    { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-    { label: "实时地图" },
-  ], body);
+      ? mapBoardHtml(maps)
+      : isPending(mapsNote || "正在读取地图")
+        ? spin("正在读取地图")
+        : plainView(
+            "实时地图",
+            `${esc(mapsNote)}<br /><button type="button" data-map-retry>重试</button>`,
+          );
+  return tarkovFrame(
+    "实时地图",
+    [
+      { label: "主菜单", href: "/主菜单" },
+      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+      { label: "实时地图" },
+    ],
+    body,
+  );
 }
 
 async function loadMaps() {
   if (mapsLoading || mapsLoaded) return;
+  const request = ++mapsRequestSeq;
+  const mode = gameMode;
   mapsLoading = true;
   mapsNote = "正在读取地图";
   try {
-    const data = await invoke<{ items: { slug: string; name: string; english?: string; thumb_link?: string; thumbLink?: string }[] }>("site_get", { path: "/guides/tarkov/maps" });
+    const data = await invoke<{
+      items: {
+        slug: string;
+        name: string;
+        english?: string;
+        thumb_link?: string;
+        thumbLink?: string;
+      }[];
+    }>("site_get", { path: "/guides/tarkov/maps" });
+    if (request !== mapsRequestSeq || mode !== gameMode) return;
+    if (!Array.isArray(data.items)) throw new Error("地图列表响应无效");
     maps = (data.items || []).map((item) => ({
       slug: item.slug,
       name: item.name,
@@ -859,12 +1187,15 @@ async function loadMaps() {
     }));
     mapsNote = maps.length ? "" : "没有读到地图";
   } catch (error) {
+    if (request !== mapsRequestSeq || mode !== gameMode) return;
     mapsNote = error instanceof Error ? error.message : "地图读取失败";
   } finally {
-    mapsLoading = false;
-    mapsLoaded = true;
-    fillMapMenu();
-    render();
+    if (request === mapsRequestSeq) {
+      mapsLoading = false;
+      mapsLoaded = true;
+      fillMapMenu();
+      render();
+    }
   }
 }
 
@@ -895,7 +1226,10 @@ function discardMapPage() {
 }
 
 function esc(value: string) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+  return value.replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch,
+  );
 }
 
 function readDetail(value: Record<string, unknown>): RoomDetail | null {
@@ -914,7 +1248,7 @@ function readDetail(value: Record<string, unknown>): RoomDetail | null {
     maxMembers: Number(value.max_members || value.maxMembers || 0),
     isHost: Boolean(value.is_host || value.isHost),
     members: members.map((row) => {
-      const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+      const item = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
       return {
         userId: Number(item.user_id || item.userId || 0),
         name: String(item.display_name || item.displayName || "成员"),
@@ -927,20 +1261,22 @@ function readDetail(value: Record<string, unknown>): RoomDetail | null {
     viewMaps: readViewMaps(value.view_maps ?? value.viewMaps),
     phases: readPhases(value.log_phases ?? value.logPhases),
     claims: (Array.isArray(value.claims) ? value.claims : []).flatMap((row) => {
-      const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+      const item = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
       const taskId = String(item.task_id || item.taskId || "").trim();
       const userId = Number(item.user_id || item.userId || 0);
       if (!taskId || !userId) return [];
       return [{ taskId, userId, name: String(item.display_name || item.displayName || "") }];
     }),
-    objectives: (Array.isArray(value.objective_dones) ? value.objective_dones : []).flatMap((row) => {
-      const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
-      const taskId = String(item.task_id || item.taskId || "").trim();
-      const objectiveId = String(item.objective_id || item.objectiveId || "").trim();
-      const userId = Number(item.user_id || item.userId || 0);
-      if (!taskId || !objectiveId || !userId) return [];
-      return [{ taskId, objectiveId, userId }];
-    }),
+    objectives: (Array.isArray(value.objective_dones) ? value.objective_dones : []).flatMap(
+      (row) => {
+        const item = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
+        const taskId = String(item.task_id || item.taskId || "").trim();
+        const objectiveId = String(item.objective_id || item.objectiveId || "").trim();
+        const userId = Number(item.user_id || item.userId || 0);
+        if (!taskId || !objectiveId || !userId) return [];
+        return [{ taskId, objectiveId, userId }];
+      },
+    ),
   };
 }
 
@@ -1012,7 +1348,8 @@ function readClientMap(payload: Record<string, unknown>) {
 
 function shownClients(member: RoomMember) {
   const clients = [...member.clients];
-  if (member.userId === viewerId && roomLive && !clients.includes("desktop")) clients.push("desktop");
+  if (member.userId === viewerId && roomLive && !clients.includes("desktop"))
+    clients.push("desktop");
   return clients;
 }
 
@@ -1044,9 +1381,18 @@ function failText(reason: unknown, fallback: string) {
 }
 
 function applyDetail(detail: RoomDetail, slug: string, password = room.password) {
+  if (room.id && detail.id && !sameRoomIdentity(room.id, detail.id)) {
+    roomEpoch += 1;
+    roomMapSequence += 1;
+    roomViewSequence += 1;
+    pendingRoomView = null;
+    claimSeedKey = "";
+  }
+  roomDetailRevision += 1;
   roomPending = false;
   room = {
-    slug: detail.mapSlug || slug,
+    slug:
+      slug || detail.viewMaps.find((item) => item.userId === viewerId)?.mapSlug || detail.mapSlug,
     id: detail.id,
     status: `私人房间 ${detail.id}`,
     error: "",
@@ -1055,7 +1401,16 @@ function applyDetail(detail: RoomDetail, slug: string, password = room.password)
   };
 }
 
-const MEMBER_COLORS = ["#e8c36a", "#6cb6ff", "#6fbf4a", "#e08a2c", "#d44a4a", "#c77dff", "#4ab8b8", "#f0a3c2"];
+const MEMBER_COLORS = [
+  "#e8c36a",
+  "#6cb6ff",
+  "#6fbf4a",
+  "#e08a2c",
+  "#d44a4a",
+  "#c77dff",
+  "#4ab8b8",
+  "#f0a3c2",
+];
 
 function memberColor(userId: number) {
   const id = `user:${userId}`;
@@ -1076,7 +1431,8 @@ function memberViewSlug(userId: number) {
 
 function memberTone(online: boolean, kind: string, mapSlug: string) {
   if (!online) return "offline";
-  if (kind === "match_found" || kind === "raid_starting" || kind === "raid_started") return "in_raid";
+  if (kind === "match_found" || kind === "raid_starting" || kind === "raid_started")
+    return "in_raid";
   if (kind === "map_loading" || kind === "matching") return "matching";
   if (mapSlug) return "watching";
   return "lobby";
@@ -1127,15 +1483,17 @@ function paintRoomCard() {
   const max = detail.maxMembers;
   title.textContent = detail.title.trim() || "房间";
   meta.textContent = `${mapName} · ${count}${max ? `/${max}` : ""} · ${roomCode(detail.id)}`;
-  const rows = people.map((item) => {
-    const on = item.online || shownClients(item).length > 0;
-    const tone = memberTone(on, phaseKindFor(item.userId), memberViewSlug(item.userId));
-    return `<tr data-status="${tone}">
+  const rows = people
+    .map((item) => {
+      const on = item.online || shownClients(item).length > 0;
+      const tone = memberTone(on, phaseKindFor(item.userId), memberViewSlug(item.userId));
+      return `<tr data-status="${tone}">
       <td><span class="room-person"><i class="room-dot" style="background:${memberColor(item.userId)}"></i>${item.host ? `<span class="room-star">⭐</span>` : ""}<span class="room-person-name">${esc(item.name)}</span><span class="room-presence">${esc(onlineLabel(item))}</span></span></td>
       <td>${esc(memberMapText(item.userId))}</td>
       <td>${toneLabel(tone)}</td>
     </tr>`;
-  }).join("");
+    })
+    .join("");
   live.innerHTML = `<table class="room-table"><thead><tr><th scope="col">成员</th><th scope="col">地图</th><th scope="col">状态</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -1154,76 +1512,124 @@ function pushQuestRoom() {
   });
 }
 
+function enqueueRoomWrite(work: () => Promise<void>) {
+  const next = roomWriteQueue.then(work, work);
+  roomWriteQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+function isCurrentRoom(roomId: string, epoch: number) {
+  return sameRoomIdentity(room.id, roomId) && roomEpoch === epoch;
+}
+
 async function syncQuestClaims() {
   const detail = room.detail;
   if (!room.id || !detail) return;
+  const roomId = room.id;
+  const epoch = roomEpoch;
   const slug = detail.mapSlug || room.slug;
-  const key = `${room.id}:${slug}`;
+  const key = `${roomId}:${slug}`;
   if (claimSeedKey === key) {
     pushQuestRoom();
     return;
   }
   claimSeedKey = key;
-  const progress = mapQuestProgress();
-  const mine = new Set(detail.claims.filter((item) => item.userId === viewerId).map((item) => item.taskId));
-  const occupied = new Set(detail.claims.map((item) => item.taskId));
-  const added: string[] = [];
-  for (const id of progress.onMapIds) {
-    if (!progress.started.includes(id) || progress.done.includes(id) || mine.has(id)) continue;
-    if (!occupied.has(id) && occupied.size >= 40) break;
-    added.push(id);
-    occupied.add(id);
-  }
   try {
-    if (added.length) {
-      const claimed = await invoke<Record<string, unknown>>("site_post", {
-        path: `/guides/tarkov/raid-rooms/${room.id}/claims`,
-        body: { task_ids: added },
+    await enqueueRoomWrite(async () => {
+      if (!isCurrentRoom(roomId, epoch) || !room.detail) return;
+      const current = room.detail;
+      const progress = mapQuestProgress();
+      const mine = new Set(
+        current.claims.filter((item) => item.userId === viewerId).map((item) => item.taskId),
+      );
+      const occupied = new Set(current.claims.map((item) => item.taskId));
+      const added: string[] = [];
+      for (const id of progress.onMapIds) {
+        if (!progress.started.includes(id) || progress.done.includes(id) || mine.has(id)) continue;
+        if (!occupied.has(id) && occupied.size >= 40) break;
+        added.push(id);
+        occupied.add(id);
+      }
+      if (added.length) {
+        const revision = ++roomDetailRevision;
+        const claimed = await invoke<Record<string, unknown>>("site_post", {
+          path: `/guides/tarkov/raid-rooms/${roomId}/claims`,
+          body: { task_ids: added },
+        });
+        if (!isCurrentRoom(roomId, epoch)) return;
+        const next = readDetail(claimed);
+        if (next) adoptRoom(next, revision);
+      }
+      if (!isCurrentRoom(roomId, epoch)) return;
+      const revision = ++roomDetailRevision;
+      const seeded = await invoke<Record<string, unknown>>("site_post", {
+        path: `/guides/tarkov/raid-rooms/${roomId}/claims/from-progress`,
+        body: {},
       });
-      const next = readDetail(claimed);
-      if (next) room.detail = next;
-    }
-    const seeded = await invoke<Record<string, unknown>>("site_post", {
-      path: `/guides/tarkov/raid-rooms/${room.id}/claims/from-progress`,
-      body: {},
-    }).catch(() => null);
-    const next = seeded ? readDetail(seeded) : null;
-    if (next) room.detail = next;
+      if (!isCurrentRoom(roomId, epoch)) return;
+      const next = readDetail(seeded);
+      if (next) adoptRoom(next, revision);
+    });
   } catch {
-    /* 勾选失败时仍按当前房间认领画点 */
+    if (claimSeedKey === key) claimSeedKey = "";
   }
+  if (!isCurrentRoom(roomId, epoch)) return;
   pushQuestRoom();
 }
 
 async function toggleClaim(id: string, on: boolean) {
   if (!room.id || !room.detail) return;
-  const occupied = new Set(room.detail.claims.map((item) => item.taskId));
-  if (on && !occupied.has(id) && occupied.size >= 40) return;
+  const roomId = room.id;
+  const epoch = roomEpoch;
   try {
-    const data = on
-      ? await invoke<Record<string, unknown>>("site_put", { path: `/guides/tarkov/raid-rooms/${room.id}/claims/${encodeURIComponent(id)}`, body: {} })
-      : await invoke<Record<string, unknown>>("site_delete", { path: `/guides/tarkov/raid-rooms/${room.id}/claims/${encodeURIComponent(id)}` });
-    const next = readDetail(data);
-    if (next) room.detail = next;
+    await enqueueRoomWrite(async () => {
+      if (!isCurrentRoom(roomId, epoch) || !room.detail) return;
+      const occupied = new Set(room.detail.claims.map((item) => item.taskId));
+      if (on && !occupied.has(id) && occupied.size >= 40) return;
+      const revision = ++roomDetailRevision;
+      const data = on
+        ? await invoke<Record<string, unknown>>("site_put", {
+            path: `/guides/tarkov/raid-rooms/${roomId}/claims/${encodeURIComponent(id)}`,
+            body: {},
+          })
+        : await invoke<Record<string, unknown>>("site_delete", {
+            path: `/guides/tarkov/raid-rooms/${roomId}/claims/${encodeURIComponent(id)}`,
+          });
+      if (!isCurrentRoom(roomId, epoch)) return;
+      const next = readDetail(data);
+      if (next) adoptRoom(next, revision);
+    });
   } catch {
-    /* 认领失败时列表会按房间里的勾选画回去 */
+    if (isCurrentRoom(roomId, epoch)) void refreshRoom();
   }
+  if (!isCurrentRoom(roomId, epoch)) return;
   pushQuestRoom();
 }
 
 async function markQuestObjective(taskId: string, objectiveId: string, done: boolean) {
   setMapObjective(taskId, objectiveId, done);
   if (!room.id) return;
-  const path = `/guides/tarkov/raid-rooms/${room.id}/objective-dones/${encodeURIComponent(taskId)}/${encodeURIComponent(objectiveId)}`;
+  const roomId = room.id;
+  const epoch = roomEpoch;
+  const path = `/guides/tarkov/raid-rooms/${roomId}/objective-dones/${encodeURIComponent(taskId)}/${encodeURIComponent(objectiveId)}`;
   try {
-    const data = done
-      ? await invoke<Record<string, unknown>>("site_put", { path, body: {} })
-      : await invoke<Record<string, unknown>>("site_delete", { path });
-    const next = readDetail(data);
-    if (next) room.detail = next;
-    pushQuestRoom();
+    await enqueueRoomWrite(async () => {
+      if (!isCurrentRoom(roomId, epoch)) return;
+      const revision = ++roomDetailRevision;
+      const data = done
+        ? await invoke<Record<string, unknown>>("site_put", { path, body: {} })
+        : await invoke<Record<string, unknown>>("site_delete", { path });
+      if (!isCurrentRoom(roomId, epoch)) return;
+      const next = readDetail(data);
+      if (next) adoptRoom(next, revision);
+    });
+    if (isCurrentRoom(roomId, epoch)) pushQuestRoom();
   } catch {
     /* 账号进度已记下，房间勾选失败时自己的点仍会隐藏 */
+    if (isCurrentRoom(roomId, epoch)) void refreshRoom();
   }
 }
 
@@ -1233,25 +1639,84 @@ function watchRoom() {
   roomTimer = window.setInterval(() => void refreshRoom(), 8000);
 }
 
+function unwatchRoomSocket(
+  generation: number,
+  pendingWatch: Promise<number> | null,
+): Promise<void> {
+  const unwatch = (value: number) => {
+    if (!Number.isSafeInteger(value) || value <= 0) return Promise.resolve();
+    return invoke("room_unwatch", { generation: value })
+      .then(() => undefined)
+      .catch(() => undefined);
+  };
+  if (generation > 0) return unwatch(generation);
+  if (pendingWatch) return pendingWatch.then(unwatch, () => undefined);
+  return Promise.resolve();
+}
+
 function syncRoomSocket() {
-  if (!room.id) {
+  setPlayerRoomId(room.id);
+  const nextRoomId = normalizeRoomIdentity(room.id);
+  if (!nextRoomId) {
     if (socketRoomId) {
+      const generation = roomSocketGeneration;
+      const pendingWatch = roomWatchPromise;
       socketRoomId = "";
+      roomWatchRequest += 1;
+      roomSocketGeneration = 0;
+      roomWatchPromise = null;
+      pendingRoomSyncEvents.length = 0;
       roomLive = false;
-      void invoke("room_unwatch").catch(() => undefined);
+      roomConnectionRevision += 1;
+      void unwatchRoomSocket(generation, pendingWatch);
     }
     return;
   }
-  if (socketRoomId === room.id) return;
-  socketRoomId = room.id;
+  if (socketRoomId === nextRoomId) return;
+  const previousGeneration = roomSocketGeneration;
+  const previousWatch = roomWatchPromise;
+  const cleanup = socketRoomId
+    ? unwatchRoomSocket(previousGeneration, previousWatch)
+    : Promise.resolve();
+  socketRoomId = nextRoomId;
+  roomSocketGeneration = 0;
+  roomWatchPromise = null;
+  pendingRoomSyncEvents.length = 0;
+  const request = ++roomWatchRequest;
+  const expectedRoomId = nextRoomId;
   roomLive = false;
-  void invoke("room_watch", { publicId: room.id }).catch(() => undefined);
+  roomConnectionRevision += 1;
+  const watchPromise = cleanup.then(() => invoke<number>("room_watch", { publicId: room.id }));
+  roomWatchPromise = watchPromise;
+  void watchPromise
+    .then((generation) => {
+      if (
+        request === roomWatchRequest &&
+        socketRoomId === expectedRoomId &&
+        Number.isSafeInteger(generation) &&
+        generation > 0
+      ) {
+        roomSocketGeneration = generation;
+        const pending = pendingRoomSyncEvents.splice(0);
+        for (const payload of pending) {
+          if (Number(payload.connection_generation) === generation) onRoomSync(payload);
+        }
+      }
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (roomWatchPromise === watchPromise) roomWatchPromise = null;
+    });
 }
 
-function markPresence(detail: RoomDetail, ids: number[] | null, clients: Map<number, RoomClient[]> | null) {
+function markPresence(
+  detail: RoomDetail,
+  ids: number[] | null,
+  clients: Map<number, RoomClient[]> | null,
+) {
   const online = ids ? new Set(ids) : null;
   detail.members = detail.members.map((row) => {
-    const nextClients = clients ? clients.get(row.userId) ?? [] : row.clients;
+    const nextClients = clients ? (clients.get(row.userId) ?? []) : row.clients;
     const nextOnline = online ? online.has(row.userId) : nextClients.length > 0 || row.online;
     return { ...row, online: nextOnline, clients: nextClients };
   });
@@ -1327,6 +1792,35 @@ function openSyncedPicker() {
 function followAccount(payload: Record<string, unknown>, snap: Record<string, unknown> | null) {
   if (!room.id || roomPending) return;
   absorbRoomLists(payload, snap);
+  const event = String(payload.event || "");
+  const eventUserId = Number(payload.user_id || payload.userId || 0);
+  const eventMapSlug = String(payload.map_slug || payload.mapSlug || "").trim();
+  const pending = pendingRoomView;
+  const pendingIsCurrent = Boolean(
+    pending && sameRoomIdentity(pending.id, room.id) && pending.epoch === roomEpoch,
+  );
+  const serverView =
+    event === "view_map" && eventUserId === viewerId
+      ? eventMapSlug
+      : rowListSlug(payload.view_maps) || rowListSlug(snap?.view_maps);
+  if (pendingIsCurrent && pending && serverView && sameMap(serverView, pending.slug)) {
+    pendingRoomView = null;
+    room.error = "";
+  } else if (pendingIsCurrent && pending) {
+    updateRoomViewSlug(pending.slug);
+    room.slug = pending.slug;
+    lastMapSlug = pending.slug;
+    setLocalViewMap(viewerId, pending.slug);
+  }
+  if (event === "view_map" && eventUserId > 0 && eventMapSlug && room.detail) {
+    room.detail.viewMaps = [
+      ...room.detail.viewMaps.filter((item) => item.userId !== eventUserId),
+      { userId: eventUserId, mapSlug: eventMapSlug },
+    ];
+    if (pendingIsCurrent && pendingRoomView && eventUserId === viewerId)
+      updateRoomViewSlug(pendingRoomView.slug);
+    paintRoomCard();
+  }
   const phase = rowListPhase(payload.log_phases) || rowListPhase(snap?.log_phases);
   const leaving = phase?.kind === "raid_exited" || phase?.kind === "matching_aborted";
   if (phase) {
@@ -1335,14 +1829,23 @@ function followAccount(payload: Record<string, unknown>, snap: Record<string, un
     const first = !accountPhaseReady;
     accountPhaseSig = sig;
     accountPhaseReady = true;
-    const entered = phase.kind === "match_found" || phase.kind === "raid_starting" || phase.kind === "raid_started";
+    const entered =
+      phase.kind === "match_found" ||
+      phase.kind === "raid_starting" ||
+      phase.kind === "raid_started";
     if ((changed || first) && entered && phase.mapId) openSyncedMap(phase.mapId);
     else if (changed && leaving) {
       openSyncedPicker();
       return;
     }
   }
-  const view = rowListSlug(payload.view_maps) || rowListSlug(snap?.view_maps);
+  const eventView = event === "view_map" && eventUserId === viewerId ? eventMapSlug : "";
+  const view =
+    pendingRoomView &&
+    sameRoomIdentity(pendingRoomView.id, room.id) &&
+    pendingRoomView.epoch === roomEpoch
+      ? ""
+      : eventView || rowListSlug(payload.view_maps) || rowListSlug(snap?.view_maps);
   if (!view) return;
   const next = accountSlug(view);
   if (accountViewSlug && sameMap(accountViewSlug, next)) return;
@@ -1351,84 +1854,155 @@ function followAccount(payload: Record<string, unknown>, snap: Record<string, un
   openSyncedMap(next);
 }
 
-function adoptRoom(detail: RoomDetail) {
+function adoptRoom(detail: RoomDetail, expectedRevision?: number) {
+  if (expectedRevision !== undefined && expectedRevision !== roomDetailRevision) return false;
+  if (room.id && detail.id && !sameRoomIdentity(room.id, detail.id)) {
+    roomEpoch += 1;
+    roomMapSequence += 1;
+    roomViewSequence += 1;
+    pendingRoomView = null;
+    claimSeedKey = "";
+  }
   room.detail = detail;
+  roomDetailRevision += 1;
   room.id = detail.id || room.id;
   room.error = "";
   room.status = `私人房间 ${roomCode(room.id)}`;
-  const nextSlug = detail.mapSlug;
+  const pending = pendingRoomView;
+  const pendingIsCurrent = Boolean(
+    pending && sameRoomIdentity(pending.id, room.id) && pending.epoch === roomEpoch,
+  );
+  const serverView = detail.viewMaps.find((item) => item.userId === viewerId)?.mapSlug || "";
+  if (pendingIsCurrent && pending && serverView && sameMap(serverView, pending.slug)) {
+    pendingRoomView = null;
+    room.error = "";
+  } else if (pendingIsCurrent && pending) {
+    updateRoomViewSlug(pending.slug);
+    setLocalViewMap(viewerId, pending.slug);
+  }
+  const nextSlug =
+    pendingIsCurrent && pendingRoomView
+      ? pendingRoomView.slug
+      : serverView || detail.mapSlug || room.slug;
   if (roomPending || !nextSlug || nextSlug === room.slug) {
     if (nextSlug && !roomPending) room.slug = nextSlug;
     paintRoomCard();
     pushQuestRoom();
-    return;
+    return true;
   }
   room.slug = nextSlug;
   lastMapSlug = nextSlug;
-  if (path().startsWith("/主菜单/逃离塔科夫/实时地图")) go(`/主菜单/逃离塔科夫/实时地图/${nextSlug}`);
+  if (path().startsWith("/主菜单/逃离塔科夫/实时地图"))
+    go(`/主菜单/逃离塔科夫/实时地图/${nextSlug}`);
   else paintRoomCard();
+  return true;
+}
+
+function markRoomLive() {
+  if (roomLive) return;
+  roomLive = true;
+  roomConnectionRevision += 1;
+  window.clearInterval(roomTimer);
+  if (room.error.startsWith("地图已在本机切换")) {
+    room.error = "";
+    paintRoomCard();
+  }
+}
+
+function refreshRoomBoardAfterSync(changed: boolean) {
+  if (!changed || !onMapPicker()) return;
+  if (mapBoardReady()) refreshMapBoard();
+  else render();
 }
 
 function onRoomSync(payload: Record<string, unknown>) {
-  if (applyRoomSync(payload) && onMapPicker()) refreshMapBoard();
   const event = String(payload.event || "");
+  const connectionGeneration = Number(payload.connection_generation);
+  const expectedRoomId = normalizeRoomIdentity(room.id);
+  const payloadRoomId = String(payload.public_id || payload.publicId || "").trim();
+  if (!expectedRoomId || !sameRoomIdentity(payloadRoomId, expectedRoomId)) return;
+  if (!Number.isSafeInteger(connectionGeneration)) return;
+  if (!roomSocketGeneration) {
+    if (pendingRoomSyncEvents.length >= 32) pendingRoomSyncEvents.shift();
+    pendingRoomSyncEvents.push(payload);
+    return;
+  }
+  if (connectionGeneration !== roomSocketGeneration) return;
+  const rawSnap =
+    payload.snapshot && typeof payload.snapshot === "object"
+      ? (payload.snapshot as Record<string, unknown>)
+      : null;
+  const snapId = rawSnap ? String(rawSnap.public_id || rawSnap.publicId || "").trim() : "";
+  if (snapId && !sameRoomIdentity(snapId, expectedRoomId)) return;
+  const snap = rawSnap && !snapId ? { ...rawSnap, public_id: expectedRoomId } : rawSnap;
+  const boardChanged = applyRoomSync(payload, expectedRoomId);
   if (event === "closed") {
+    refreshRoomBoardAfterSync(boardChanged);
     roomLive = false;
+    roomConnectionRevision += 1;
     void refreshRoom();
     watchRoom();
     return;
   }
-  if (event === "pong" || event === "ping") return;
+  markRoomLive();
+  refreshRoomBoardAfterSync(boardChanged);
+  if (event === "pong" || event === "ping") {
+    void flushPendingRoomView();
+    return;
+  }
   const online = Array.isArray(payload.online_user_ids)
     ? payload.online_user_ids.map((item) => Number(item))
     : null;
   const clients = readClientMap(payload);
-  const snap = payload.snapshot && typeof payload.snapshot === "object"
-    ? payload.snapshot as Record<string, unknown>
-    : null;
   if (snap) {
-    if (String(snap.public_id || snap.publicId || "") !== room.id) return;
-    roomLive = true;
-    window.clearInterval(roomTimer);
     const detail = readDetail(snap);
-    if (!detail) return;
+    if (!detail) {
+      void flushPendingRoomView();
+      return;
+    }
     if (online || clients) markPresence(detail, online, clients);
-    const kicked = event === "member_leave" && Number(payload.user_id || payload.userId || 0) === viewerId;
+    const kicked =
+      event === "member_leave" && Number(payload.user_id || payload.userId || 0) === viewerId;
     if (kicked || !viewerStillSeated(snap)) {
       exitToLobby();
       return;
     }
     adoptRoom(detail);
     followAccount(payload, snap);
+    void flushPendingRoomView();
     return;
   }
   if ((event === "presence" || online || clients) && room.detail && (online || clients)) {
-    roomLive = true;
-    window.clearInterval(roomTimer);
     markPresence(room.detail, online, clients);
     paintRoomCard();
   }
   if (event === "log_phase" || event === "view_map") followAccount(payload, null);
+  void flushPendingRoomView();
 }
 
 async function refreshRoom() {
   if (!room.id || roomPending) return;
+  const roomId = room.id;
+  const epoch = roomEpoch;
+  const revision = roomDetailRevision;
   try {
-    const data = await invoke<Record<string, unknown>>("site_get", { path: `/guides/tarkov/raid-rooms/${room.id}` });
+    const data = await invoke<Record<string, unknown>>("site_get", {
+      path: `/guides/tarkov/raid-rooms/${roomId}`,
+    });
     const detail = readDetail(data);
-    if (!detail || detail.id !== room.id) return;
-    adoptRoom(detail);
+    if (!detail || detail.id !== roomId || !isCurrentRoom(roomId, epoch)) return;
+    adoptRoom(detail, revision);
   } catch {
     /* 房间快照失败时保留上一份 */
   }
 }
 
 function waitForRoomLive(id: string, ms = 8000) {
-  if (roomLive && socketRoomId === id) return Promise.resolve(true);
+  if (roomLive && sameRoomIdentity(socketRoomId, id)) return Promise.resolve(true);
   return new Promise<boolean>((resolve) => {
     const timer = window.setTimeout(() => finish(false), ms);
     const poll = window.setInterval(() => {
-      if (roomLive && room.id === id) finish(true);
+      if (roomLive && sameRoomIdentity(room.id, id)) finish(true);
     }, 100);
     const finish = (ok: boolean) => {
       window.clearTimeout(timer);
@@ -1447,6 +2021,10 @@ function keepRoom(slug: string) {
 async function ensureRoom(slug: string, name: string) {
   if (room.slug === slug && (room.id || room.error || room.status.startsWith("正在"))) return;
   const seq = ++roomSeq;
+  roomEpoch += 1;
+  roomMapSequence += 1;
+  roomDetailRevision += 1;
+  claimSeedKey = "";
   room = { slug, id: "", status: "正在创建私人房间…", error: "", password: "", detail: null };
   render();
   try {
@@ -1464,26 +2042,55 @@ async function ensureRoom(slug: string, name: string) {
     if (seq !== roomSeq) return;
     room.status = "正在设置地图…";
     render();
-    const mapped = await invoke<Record<string, unknown>>("site_post", { path: `/guides/tarkov/raid-rooms/${id}/map`, body: { map: slug } });
+    const mapped = await invoke<Record<string, unknown>>("site_post", {
+      path: `/guides/tarkov/raid-rooms/${id}/map`,
+      body: { map: slug },
+    });
     if (seq !== roomSeq) return;
     const detail = readDetail(mapped) || readDetail(created);
     if (detail) applyDetail(detail, slug);
     else {
       roomPending = false;
-      room = { slug, id, status: `私人房间 ${roomCode(id)}`, error: "", password: "", detail: null };
+      room = {
+        slug,
+        id,
+        status: `私人房间 ${roomCode(id)}`,
+        error: "",
+        password: "",
+        detail: null,
+      };
     }
   } catch (error) {
     if (seq !== roomSeq) return;
     roomPending = false;
-    room = { slug, id: "", status: "", error: failText(error, "创建房间失败"), password: "", detail: null };
+    room = {
+      slug,
+      id: "",
+      status: "",
+      error: failText(error, "创建房间失败"),
+      password: "",
+      detail: null,
+    };
   }
   render();
 }
 
 function clearRoomLocal(bump = true) {
+  roomEpoch += 1;
+  roomWatchRequest += 1;
+  const generation = roomSocketGeneration;
+  const pendingWatch = roomWatchPromise;
+  roomSocketGeneration = 0;
+  roomWatchPromise = null;
+  pendingRoomSyncEvents.length = 0;
+  roomMapSequence += 1;
+  roomViewSequence += 1;
+  pendingRoomView = null;
+  roomDetailRevision += 1;
   if (bump) roomSeq += 1;
   roomPending = false;
   roomLive = false;
+  roomConnectionRevision += 1;
   window.clearInterval(roomTimer);
   const watching = socketRoomId;
   socketRoomId = "";
@@ -1493,8 +2100,9 @@ function clearRoomLocal(bump = true) {
   accountPhaseSig = "";
   accountPhaseReady = false;
   accountViewSlug = "";
-  if (watching) void invoke("room_unwatch").catch(() => undefined);
+  if (watching) void unwatchRoomSocket(generation, pendingWatch);
   clearMapPresence();
+  clearRoomPresence();
 }
 
 let droppingRoom = "";
@@ -1508,10 +2116,12 @@ function dropUnpickedRoom() {
   if (!id || slug || roomPending || count > 1 || droppingRoom === id) return;
   droppingRoom = id;
   clearRoomLocal();
-  void invoke("site_post", { path: `/guides/tarkov/raid-rooms/${id}/leave`, body: {} }).catch(() => undefined).finally(() => {
-    if (droppingRoom === id) droppingRoom = "";
-    if (path() === "/主菜单/逃离塔科夫/联机大厅") void mountLobby(true);
-  });
+  void invoke("site_post", { path: `/guides/tarkov/raid-rooms/${id}/leave`, body: {} })
+    .catch(() => undefined)
+    .finally(() => {
+      if (droppingRoom === id) droppingRoom = "";
+      if (path() === "/主菜单/逃离塔科夫/联机大厅") void mountLobby(true);
+    });
 }
 
 function exitToMapPicker() {
@@ -1534,9 +2144,17 @@ async function createPublicRoom(title: string, listed: boolean, password: string
   }
   const seq = ++roomSeq;
   if (room.id) {
-    await invoke("site_post", { path: `/guides/tarkov/raid-rooms/${room.id}/leave`, body: {} }).catch(() => undefined);
+    await invoke("site_post", {
+      path: `/guides/tarkov/raid-rooms/${room.id}/leave`,
+      body: {},
+    }).catch(() => undefined);
     if (seq !== roomSeq) return;
     clearRoomLocal(false);
+  } else {
+    roomEpoch += 1;
+    roomMapSequence += 1;
+    roomDetailRevision += 1;
+    claimSeedKey = "";
   }
   const body: Record<string, unknown> = { listed, game_mode: gameMode };
   const name = title.trim();
@@ -1554,7 +2172,15 @@ async function createPublicRoom(title: string, listed: boolean, password: string
     roomPending = false;
     ignoredRoomId = "";
     if (detail) applyDetail(detail, detail.mapSlug || "", secret);
-    else room = { slug: "", id, status: `房间 ${roomCode(id)}`, error: "", password: secret, detail: null };
+    else
+      room = {
+        slug: "",
+        id,
+        status: `房间 ${roomCode(id)}`,
+        error: "",
+        password: secret,
+        detail: null,
+      };
     closeLobbyDialog();
     lastMapSlug = "";
     resetMapBoard();
@@ -1585,40 +2211,67 @@ function withTimeout<T>(work: Promise<T>, ms: number, message: string) {
 async function switchRoomMap(slug: string) {
   if (!room.id || roomPending || slug === (room.detail?.mapSlug || "")) return;
   const id = room.id;
+  const epoch = roomEpoch;
+  const mapSequence = ++roomMapSequence;
   const password = room.password;
+  roomDetailRevision += 1;
   roomPending = true;
   room = { slug, id, status: "正在连接房间…", error: "", password, detail: null };
   lastMapSlug = slug;
   go(`/主菜单/逃离塔科夫/实时地图/${slug}`);
   await waitForRoomLive(id, 1500);
-  if (room.id !== id) return;
+  if (!isCurrentRoom(id, epoch) || roomMapSequence !== mapSequence) return;
   room.status = "正在更换地图…";
   render();
   try {
-    const mapped = await withTimeout(invoke<Record<string, unknown>>("site_post", {
-      path: `/guides/tarkov/raid-rooms/${id}/map`,
-      body: { map: slug },
-    }), 30000, "更换地图超时，请再试一次");
-    if (room.id !== id) return;
-    const detail = readDetail(mapped);
-    if (detail) applyDetail(detail, slug, password);
-    else roomPending = false;
-    render();
-    void invoke<Record<string, unknown>>("site_post", {
-      path: `/guides/tarkov/raid-rooms/${id}/claims/from-progress`,
-      body: {},
-    }).then((seeded) => {
-      if (room.id !== id || roomPending) return;
-      const next = readDetail(seeded);
-      if (next) adoptRoom(next);
-    }).catch(() => undefined);
-    return;
+    await enqueueRoomWrite(async () => {
+      if (!isCurrentRoom(id, epoch) || roomMapSequence !== mapSequence) return;
+      const mapped = await withTimeout(
+        invoke<Record<string, unknown>>("site_post", {
+          path: `/guides/tarkov/raid-rooms/${id}/map`,
+          body: { map: slug },
+        }),
+        30000,
+        "更换地图超时，请再试一次",
+      );
+      if (!isCurrentRoom(id, epoch) || roomMapSequence !== mapSequence) return;
+      const detail = readDetail(mapped);
+      if (detail && detail.id !== id) throw new Error("房间响应与当前房间不匹配");
+      if (detail) applyDetail(detail, slug, password);
+      else {
+        roomPending = false;
+        room.slug = slug;
+        room.status = `私人房间 ${roomCode(id)}`;
+      }
+      render();
+      try {
+        const seedRevision = ++roomDetailRevision;
+        const seeded = await withTimeout(
+          invoke<Record<string, unknown>>("site_post", {
+            path: `/guides/tarkov/raid-rooms/${id}/claims/from-progress`,
+            body: {},
+          }),
+          30000,
+          "同步房间任务超时",
+        );
+        if (
+          !isCurrentRoom(id, epoch) ||
+          roomMapSequence !== mapSequence ||
+          roomDetailRevision !== seedRevision
+        )
+          return;
+        const next = readDetail(seeded);
+        if (next?.id === id) adoptRoom(next, seedRevision);
+      } catch {
+        /* 地图已切换；进度播种失败时由后续房间刷新补齐。 */
+      }
+    });
   } catch (error) {
-    if (room.id !== id) return;
+    if (!isCurrentRoom(id, epoch) || roomMapSequence !== mapSequence) return;
     roomPending = false;
     room = { slug, id, status: "", error: failText(error, "更换地图失败"), password, detail: null };
   }
-  render();
+  if (isCurrentRoom(id, epoch) && roomMapSequence === mapSequence) render();
 }
 
 function liveMapSlug() {
@@ -1636,7 +2289,7 @@ function syncLocalWatch() {
   }
   const slug = liveMapSlug();
   if (slug) spectating = true;
-  setLocalWatch(spectating ? (slug || room.slug || "") : "");
+  setLocalWatch(spectating ? slug || room.slug || "" : "");
 }
 
 function openLiveRaidMap() {
@@ -1645,7 +2298,96 @@ function openLiveRaidMap() {
   void switchRoomMap(gameMapSlug);
 }
 
+function roomViewSlug() {
+  return (
+    room.detail?.viewMaps.find((item) => item.userId === viewerId)?.mapSlug ||
+    room.slug ||
+    room.detail?.mapSlug ||
+    ""
+  );
+}
+
+function updateRoomViewSlug(slug: string) {
+  if (!room.detail || !viewerId) return;
+  room.detail.viewMaps = [
+    ...room.detail.viewMaps.filter((item) => item.userId !== viewerId),
+    { userId: viewerId, mapSlug: slug },
+  ];
+}
+
+function applyPendingRoomView(pending: {
+  id: string;
+  epoch: number;
+  sequence: number;
+  slug: string;
+}) {
+  if (!isCurrentRoom(pending.id, pending.epoch) || pendingRoomView?.sequence !== pending.sequence)
+    return;
+  room.slug = pending.slug;
+  lastMapSlug = pending.slug;
+  updateRoomViewSlug(pending.slug);
+  setLocalViewMap(viewerId, pending.slug);
+  if (liveMapSlug() !== pending.slug) go(`/主菜单/逃离塔科夫/实时地图/${pending.slug}`);
+}
+
+async function flushPendingRoomView() {
+  const pending = pendingRoomView;
+  if (!pending || !roomLive || !isCurrentRoom(pending.id, pending.epoch)) return;
+  const connection = roomConnectionRevision;
+  if (pending.sentConnection === connection) return;
+  if (pending.sentConnection !== -1) pending.retryAttempt = 0;
+  pending.sentConnection = connection;
+  applyPendingRoomView(pending);
+  try {
+    await invoke("room_send", { body: { event: "view_map", map_id: pending.slug } });
+    if (roomConnectionRevision === connection && pending.sentConnection === connection)
+      pending.retryAttempt = 0;
+  } catch {
+    if (
+      !isCurrentRoom(pending.id, pending.epoch) ||
+      pendingRoomView?.sequence !== pending.sequence ||
+      roomConnectionRevision !== connection ||
+      pending.sentConnection !== connection
+    )
+      return;
+    pending.sentConnection = -1;
+    const delay = Math.min(500 * 2 ** Math.min(pending.retryAttempt, 4), 8_000);
+    pending.retryAttempt += 1;
+    window.setTimeout(() => {
+      if (pendingRoomView?.sequence === pending.sequence) void flushPendingRoomView();
+    }, delay);
+  }
+}
+
+async function selectRoomViewMap(slug: string) {
+  if (!room.id || roomPending || !slug.trim()) return;
+  const id = room.id;
+  const epoch = roomEpoch;
+  const sequence = ++roomViewSequence;
+  const next = slug.trim();
+  const current = roomViewSlug();
+  if (sameMap(current, next)) {
+    room.slug = next;
+    lastMapSlug = next;
+    setLocalViewMap(viewerId, next);
+    if (liveMapSlug() !== next) go(`/主菜单/逃离塔科夫/实时地图/${next}`);
+    return;
+  }
+  pendingRoomView = { id, epoch, sequence, slug: next, sentConnection: -1, retryAttempt: 0 };
+  applyPendingRoomView(pendingRoomView);
+  render();
+  if (!roomLive) await waitForRoomLive(id, 1500);
+  if (!isCurrentRoom(id, epoch) || pendingRoomView?.sequence !== sequence) return;
+  if (!roomLive) {
+    room.error = "地图已在本机切换；房间连接恢复后会重试同步。";
+    render();
+    return;
+  }
+  await flushPendingRoomView();
+}
+
 function paint() {
+  let pageLoadTicket = pageLoadGuard.begin(routeKey());
   dropUnpickedRoom();
   syncLocalWatch();
   if (path() === "/主菜单/逃离塔科夫/联机大厅") lastMapSlug = "";
@@ -1666,7 +2408,7 @@ function paint() {
     root.innerHTML = menuView();
     return;
   }
-  const tavern = tavernMatch(current);
+  const tavern = tavernMatch(location.pathname);
   if (tavern) {
     window.clearInterval(usageTimer);
     const crumbsItems = [
@@ -1685,42 +2427,101 @@ function paint() {
     return;
   }
   void loadMaps();
-  const catalog = matchCatalog(current);
-  if (catalog) {
+  const catalogBase = `${base}/物品图鉴`;
+  if (current === catalogBase || current.startsWith(`${catalogBase}/`)) {
     window.clearInterval(usageTimer);
-    root.innerHTML = tarkovFrame("物品图鉴", [
+    const title = "物品图鉴";
+    const breadcrumbs = [
       { label: "主菜单", href: "/主菜单" },
       { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "物品图鉴" },
-    ], catalogShell());
-    void mountCatalog(catalog);
+      { label: title },
+    ];
+    root.innerHTML = tarkovFrame(
+      title,
+      breadcrumbs,
+      `<section class="catalog" id="catalog" aria-live="polite">${spin("正在加载物品图鉴")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./itemCatalog"),
+      ({ catalogShell, matchCatalog, mountCatalog }) => {
+        const catalog = matchCatalog(current);
+        if (!catalog) return;
+        root.innerHTML = tarkovFrame(title, breadcrumbs, catalogShell());
+        void mountCatalog(catalog);
+      },
+      "#catalog",
+      "物品图鉴加载失败，请重新进入此页面。",
+    );
     return;
   }
   const wiki = matchWiki(current);
   if (wiki) {
     window.clearInterval(usageTimer);
     const wikiNav = wiki.kind === "item" ? "物品图鉴" : wiki.kind === "boss" ? "Boss" : "综合搜索";
-    root.innerHTML = tarkovFrame(wikiNav, [
-      { label: "主菜单", href: "/主菜单" },
-      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      ...(wiki.kind === "item" ? [{ label: "物品图鉴", href: "/主菜单/逃离塔科夫/物品图鉴" }] : []),
-      ...(wiki.kind === "boss" ? [{ label: "Boss", href: "/主菜单/逃离塔科夫/Boss" }] : []),
-      { label: wiki.crumb },
-    ], wikiShell(wiki));
-    void mountWiki(wiki);
+    root.innerHTML = tarkovFrame(
+      wikiNav,
+      [
+        { label: "主菜单", href: "/主菜单" },
+        { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+        ...(wiki.kind === "item"
+          ? [{ label: "物品图鉴", href: "/主菜单/逃离塔科夫/物品图鉴" }]
+          : []),
+        ...(wiki.kind === "boss" ? [{ label: "Boss", href: "/主菜单/逃离塔科夫/Boss" }] : []),
+        { label: wiki.crumb },
+      ],
+      `<section class="wiki" id="wiki" aria-live="polite">${spin("正在加载页面")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./wiki"),
+      ({ mountWiki, wikiShell }) => {
+        root.innerHTML = tarkovFrame(
+          wikiNav,
+          [
+            { label: "主菜单", href: "/主菜单" },
+            { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+            ...(wiki.kind === "item"
+              ? [{ label: "物品图鉴", href: "/主菜单/逃离塔科夫/物品图鉴" }]
+              : []),
+            ...(wiki.kind === "boss" ? [{ label: "Boss", href: "/主菜单/逃离塔科夫/Boss" }] : []),
+            { label: wiki.crumb },
+          ],
+          wikiShell(wiki),
+        );
+        void mountWiki(wiki);
+      },
+      "#wiki",
+      "页面加载失败，请重新进入此页面。",
+    );
     return;
   }
   const rest = current.slice(base.length + 1);
   const [section = "综合搜索", rawSlug = ""] = rest.split("/");
-  const sectionName = section === "视觉增强" || section === "辅助工具" || section === "应用设置" ? "妙妙工具" : section === "大厅" ? "联机大厅" : section === "钥匙" ? "钥匙管理" : section === "工作台" ? "枪匠工作台" : section;
-  const known = sections.includes(sectionName as (typeof sections)[number]) ? sectionName : "综合搜索";
+  const sectionName =
+    section === "视觉增强" || section === "辅助工具" || section === "应用设置"
+      ? "妙妙工具"
+      : section === "大厅"
+        ? "联机大厅"
+        : section === "钥匙"
+          ? "钥匙管理"
+          : section === "工作台"
+            ? "枪匠工作台"
+            : section;
+  const known = sections.includes(sectionName as (typeof sections)[number])
+    ? sectionName
+    : "综合搜索";
   const mapSlug = known === "实时地图" ? rawSlug : "";
   if (known === "实时地图" && mapSlug) {
     window.clearInterval(usageTimer);
     lastMapSlug = mapSlug;
     if (room.id && !roomPending && !room.error) room.slug = mapSlug;
     const ready = Boolean(room.id) && room.slug === mapSlug && !roomPending && !room.error;
-    if (ready && (root.querySelector("#map-root")?.getAttribute("data-slug") === mapSlug || showCachedMap(mapSlug))) {
+    if (
+      ready &&
+      (root.querySelector("#map-root")?.getAttribute("data-slug") === mapSlug ||
+        showCachedMap(mapSlug))
+    ) {
       fillMapMenu();
       paintRoomCard();
       watchRoom();
@@ -1753,6 +2554,13 @@ function paint() {
     if (!roomPending && maps.length && !mapBoardReady()) {
       void loadMapBoard({ roomId: room.id, viewerId, viewerName }, maps).then((found) => {
         rememberBoardRoom(found);
+        const pendingView = pendingRoomView;
+        if (pendingView && isCurrentRoom(pendingView.id, pendingView.epoch)) {
+          room.slug = pendingView.slug;
+          lastMapSlug = pendingView.slug;
+          updateRoomViewSlug(pendingView.slug);
+          setLocalViewMap(viewerId, pendingView.slug);
+        }
         if (gameInRaid && gameMapSlug && room.id) {
           openLiveRaidMap();
           return;
@@ -1765,112 +2573,226 @@ function paint() {
   if (known === "联机大厅") {
     window.clearInterval(usageTimer);
     if (section === "大厅") replaceNav(encodeURI("/主菜单/逃离塔科夫/联机大厅"));
-    root.innerHTML = tarkovFrame("联机大厅", [
-      { label: "主菜单", href: "/主菜单" },
-      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "联机大厅" },
-    ], lobbyShell());
+    root.innerHTML = tarkovFrame(
+      "联机大厅",
+      [
+        { label: "主菜单", href: "/主菜单" },
+        { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+        { label: "联机大厅" },
+      ],
+      lobbyShell(),
+    );
     void mountLobby();
     return;
   }
   if (known === "钥匙管理") {
     window.clearInterval(usageTimer);
-    if (section === "钥匙") replaceNav(encodeURI(`/主菜单/逃离塔科夫/钥匙管理${rawSlug ? `/${rawSlug}` : ""}`));
-    root.innerHTML = tarkovFrame("钥匙管理", [
+    if (section === "钥匙") {
+      replaceNav(encodeURI(`/主菜单/逃离塔科夫/钥匙管理${rawSlug ? `/${rawSlug}` : ""}`));
+      pageLoadTicket = pageLoadGuard.begin(routeKey());
+    }
+    const title = "钥匙管理";
+    const breadcrumbs = [
       { label: "主菜单", href: "/主菜单" },
       { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "钥匙管理" },
-    ], keyShell());
-    void mountKeys(rawSlug);
+      { label: title },
+    ];
+    root.innerHTML = tarkovFrame(
+      title,
+      breadcrumbs,
+      `<section id="keys">${spin("正在加载钥匙管理")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./keys"),
+      ({ keyShell, mountKeys }) => {
+        root.innerHTML = tarkovFrame(title, breadcrumbs, keyShell());
+        void mountKeys(rawSlug);
+      },
+      "#keys",
+      "钥匙管理加载失败，请重新进入此页面。",
+    );
     return;
   }
   if (known === "枪匠工作台") {
     window.clearInterval(usageTimer);
     if (section === "工作台") {
-      replaceNav(encodeURI(`/主菜单/逃离塔科夫/枪匠工作台${rawSlug ? `/${rawSlug}` : ""}`) + location.search);
+      replaceNav(
+        encodeURI(`/主菜单/逃离塔科夫/枪匠工作台${rawSlug ? `/${rawSlug}` : ""}`) + location.search,
+      );
+      pageLoadTicket = pageLoadGuard.begin(routeKey());
     }
-    root.innerHTML = tarkovFrame("枪匠工作台", [
+    const title = "枪匠工作台";
+    const breadcrumbs = [
       { label: "主菜单", href: "/主菜单" },
       { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "枪匠工作台" },
-    ], workbenchShell());
-    void mountWorkbench(rawSlug);
+      { label: title },
+    ];
+    root.innerHTML = tarkovFrame(
+      title,
+      breadcrumbs,
+      `<section class="workbench" id="workbench" aria-live="polite">${spin("正在加载枪匠工作台")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./workbench"),
+      ({ mountWorkbench, workbenchShell }) => {
+        root.innerHTML = tarkovFrame(title, breadcrumbs, workbenchShell());
+        void mountWorkbench(rawSlug);
+      },
+      "#workbench",
+      "枪匠工作台加载失败，请重新进入此页面。",
+    );
     return;
   }
   if (known === "藏身处") {
     window.clearInterval(usageTimer);
-    root.innerHTML = tarkovFrame("藏身处", [
+    const title = "藏身处";
+    const breadcrumbs = [
       { label: "主菜单", href: "/主菜单" },
       { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "藏身处" },
-    ], hideoutShell());
-    void mountHideout(rawSlug);
+      { label: title },
+    ];
+    root.innerHTML = tarkovFrame(
+      title,
+      breadcrumbs,
+      `<section id="hideout">${spin("正在加载藏身处")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./hideout"),
+      ({ hideoutShell, mountHideout }) => {
+        root.innerHTML = tarkovFrame(title, breadcrumbs, hideoutShell());
+        void mountHideout(rawSlug);
+      },
+      "#hideout",
+      "藏身处加载失败，请重新进入此页面。",
+    );
     return;
   }
   if (known === "Boss") {
     window.clearInterval(usageTimer);
-    root.innerHTML = tarkovFrame("Boss", [
+    const title = "Boss";
+    const breadcrumbs = [
       { label: "主菜单", href: "/主菜单" },
       { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "Boss" },
-    ], bossShell());
-    void mountBosses();
+      { label: title },
+    ];
+    root.innerHTML = tarkovFrame(
+      title,
+      breadcrumbs,
+      `<section id="boss-list">${spin("正在加载 Boss")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./bossList"),
+      ({ bossShell, mountBosses }) => {
+        root.innerHTML = tarkovFrame(title, breadcrumbs, bossShell());
+        void mountBosses();
+      },
+      "#boss-list",
+      "Boss 页面加载失败，请重新进入此页面。",
+    );
     return;
   }
   if (known === "弹药对照") {
     window.clearInterval(usageTimer);
-    root.innerHTML = tarkovFrame("弹药对照", [
+    const title = "弹药对照";
+    const breadcrumbs = [
       { label: "主菜单", href: "/主菜单" },
       { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "弹药对照" },
-    ], ammoShell());
-    void mountAmmo();
+      { label: title },
+    ];
+    root.innerHTML = tarkovFrame(
+      title,
+      breadcrumbs,
+      `<section id="ammo-chart">${spin("正在加载弹药对照")}</section>`,
+    );
+    loadPageModule(
+      pageLoadTicket,
+      () => import("./ammoChart"),
+      ({ ammoShell, mountAmmo }) => {
+        root.innerHTML = tarkovFrame(title, breadcrumbs, ammoShell());
+        void mountAmmo();
+      },
+      "#ammo-chart",
+      "弹药对照加载失败，请重新进入此页面。",
+    );
     return;
   }
   if (known === "妙妙工具") {
-    root.innerHTML = tarkovFrame("妙妙工具", [
-      { label: "主菜单", href: "/主菜单" },
-      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "妙妙工具" },
-    ], toolsView());
+    root.innerHTML = tarkovFrame(
+      "妙妙工具",
+      [
+        { label: "主菜单", href: "/主菜单" },
+        { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+        { label: "妙妙工具" },
+      ],
+      toolsView(),
+    );
     void refreshSettings();
     void mountTools();
     return;
   }
   if (known === "日志监控") {
     window.clearInterval(usageTimer);
-    root.innerHTML = tarkovFrame("日志监控", [
-      { label: "主菜单", href: "/主菜单" },
-      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "日志监控" },
-    ], logMonitorHtml());
+    root.innerHTML = tarkovFrame(
+      "日志监控",
+      [
+        { label: "主菜单", href: "/主菜单" },
+        { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+        { label: "日志监控" },
+      ],
+      logMonitorHtml(),
+    );
     void refreshLogMonitor();
     logTimer = window.setInterval(() => void refreshLogMonitor(), 1000);
     return;
   }
   window.clearInterval(usageTimer);
   if (known === "任务管理") {
-    root.innerHTML = tarkovFrame("任务管理", [
-      { label: "主菜单", href: "/主菜单" },
-      { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
-      { label: "任务管理" },
-    ], taskPageShell());
+    root.innerHTML = tarkovFrame(
+      "任务管理",
+      [
+        { label: "主菜单", href: "/主菜单" },
+        { label: "逃离塔科夫", href: "/主菜单/逃离塔科夫/综合搜索" },
+        { label: "任务管理" },
+      ],
+      taskPageShell(),
+    );
     void mountTaskPage();
     return;
   }
-  const body = known === "综合搜索"
-    ? searchView()
-    : plainView(known, "页面先放在这里，功能稍后接上。");
-  root.innerHTML = tarkovFrame(known, [
-    { label: "主菜单", href: "/主菜单" },
-    { label: "逃离塔科夫", href: known === "综合搜索" ? undefined : "/主菜单/逃离塔科夫/综合搜索" },
-    ...(known === "综合搜索" ? [] : [{ label: known }]),
-  ], body);
+  const body =
+    known === "综合搜索" ? searchView() : plainView(known, "页面先放在这里，功能稍后接上。");
+  root.innerHTML = tarkovFrame(
+    known,
+    [
+      { label: "主菜单", href: "/主菜单" },
+      {
+        label: "逃离塔科夫",
+        href: known === "综合搜索" ? undefined : "/主菜单/逃离塔科夫/综合搜索",
+      },
+      ...(known === "综合搜索" ? [] : [{ label: known }]),
+    ],
+    body,
+  );
 }
 
 type ToolVisual = {
-  gamma: number; brightness: number; contrast: number; red: number; green: number; blue: number;
-  night: boolean; nightBrightness: number; nightGray: number; nightContrast: number; bigMap: boolean; hotkey: string; screen: number;
+  gamma: number;
+  brightness: number;
+  contrast: number;
+  red: number;
+  green: number;
+  blue: number;
+  night: boolean;
+  nightBrightness: number;
+  nightGray: number;
+  nightContrast: number;
+  bigMap: boolean;
+  hotkey: string;
+  screen: number;
 };
 type ToolState = {
   schemes: { name: string; visual: ToolVisual }[];
@@ -1882,9 +2804,30 @@ type ToolState = {
 };
 let toolState: ToolState | null = null;
 let hotkeyCapture: { kind: "scheme"; index: number } | { kind: "fitness" } | null = null;
-type ShotSettings = { syncEnabled: boolean; pruneEnabled: boolean; keepMax: number; hotkey: string; autoEnabled: boolean; autoSecs: number; hotkeyFromGame?: boolean; gameHotkey?: string };
-let shotSettings: ShotSettings = { syncEnabled: true, pruneEnabled: false, keepMax: 20, hotkey: "PrintScreen", autoEnabled: false, autoSecs: 5 };
+let toolSaveToken = 0;
+let toolSaveQueue: Promise<void> = Promise.resolve();
+let toolLoadToken = 0;
+type ShotSettings = {
+  syncEnabled: boolean;
+  pruneEnabled: boolean;
+  keepMax: number;
+  hotkey: string;
+  autoEnabled: boolean;
+  autoSecs: number;
+  hotkeyFromGame?: boolean;
+  gameHotkey?: string;
+};
+let shotSettings: ShotSettings = {
+  syncEnabled: true,
+  pruneEnabled: false,
+  keepMax: 20,
+  hotkey: "PrintScreen",
+  autoEnabled: false,
+  autoSecs: 5,
+};
+let shotSavedSettings: ShotSettings = { ...shotSettings };
 let shotSaveToken = 0;
+let shotSaveQueue: Promise<void> = Promise.resolve();
 
 function consumeLocate() {
   const pending = sessionStorage.getItem("zhange.locateTask");
@@ -1915,6 +2858,7 @@ function shotSettingsDialogHtml() {
             <span>秒自动截图</span>
           </div>
         </div>
+        <p id="shot-save-note"></p>
       </div>
     </div>`;
 }
@@ -1974,16 +2918,23 @@ function paintShotDialog() {
 }
 
 function openShotSettings() {
-  void invoke<ShotSettings>("shot_settings_get").then((saved) => {
-    rememberShotSettings(saved);
-    paintShotDialog();
-    const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
-    if (modal) fadeIn(modal);
-  }).catch(() => {
-    paintShotDialog();
-    const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
-    if (modal) fadeIn(modal);
-  });
+  const token = shotSaveToken;
+  void invoke<ShotSettings>("shot_settings_get")
+    .then((saved) => {
+      if (token === shotSaveToken) rememberSavedShotSettings(saved);
+      paintShotDialog();
+      const note = document.querySelector("#shot-save-note");
+      if (note && token === shotSaveToken) note.textContent = "";
+      const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
+      if (modal) fadeIn(modal);
+    })
+    .catch((reason: unknown) => {
+      paintShotDialog();
+      const note = document.querySelector("#shot-save-note");
+      if (note && token === shotSaveToken) note.textContent = failText(reason, "无法读取截图设置");
+      const modal = document.querySelector<HTMLElement>("#shot-settings-modal");
+      if (modal) fadeIn(modal);
+    });
 }
 
 function closeShotSettings() {
@@ -1993,7 +2944,11 @@ function closeShotSettings() {
 }
 
 function rememberShotSettings(next: ShotSettings) {
-  shotSettings = {
+  shotSettings = normalizeShotSettings(next);
+}
+
+function normalizeShotSettings(next: ShotSettings): ShotSettings {
+  return {
     syncEnabled: next.syncEnabled !== false,
     pruneEnabled: Boolean(next.pruneEnabled),
     keepMax: Math.min(200, Math.max(1, Math.floor(Number(next.keepMax) || 20))),
@@ -2005,27 +2960,127 @@ function rememberShotSettings(next: ShotSettings) {
   };
 }
 
-async function saveShotSettings(patch: Partial<ShotSettings> = {}) {
+function rememberSavedShotSettings(next: ShotSettings) {
+  const saved = normalizeShotSettings(next);
+  shotSettings = saved;
+  shotSavedSettings = { ...saved };
+}
+
+function saveShotSettings(patch: Partial<ShotSettings> = {}) {
   rememberShotSettings({ ...shotSettings, ...patch });
   paintShotDialog();
   const token = ++shotSaveToken;
-  const saved = await invoke<ShotSettings>("shot_settings_set", { settings: shotSettings });
-  if (token !== shotSaveToken) return;
-  rememberShotSettings(saved);
-  paintShotDialog();
-  window.dispatchEvent(new CustomEvent("zhange-shot-settings", { detail: shotSettings }));
+  const snapshot = { ...shotSettings };
+  const note = document.querySelector("#shot-save-note");
+  if (note) note.textContent = "保存中…";
+  const task = shotSaveQueue.then(async () => {
+    try {
+      const saved = await invoke<ShotSettings>("shot_settings_set", { settings: snapshot });
+      const normalized = normalizeShotSettings(saved);
+      shotSavedSettings = { ...normalized };
+      if (token !== shotSaveToken) return;
+      shotSettings = normalized;
+      paintShotDialog();
+      const status = document.querySelector("#shot-save-note");
+      if (status) status.textContent = "已保存";
+      window.dispatchEvent(new CustomEvent("zhange-shot-settings", { detail: shotSettings }));
+    } catch (reason) {
+      if (token !== shotSaveToken) return;
+      shotSettings = { ...shotSavedSettings };
+      paintShotDialog();
+      const status = document.querySelector("#shot-save-note");
+      if (status) status.textContent = failText(reason, "保存截图设置失败");
+      window.dispatchEvent(new CustomEvent("zhange-shot-settings", { detail: shotSettings }));
+    }
+  });
+  shotSaveQueue = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
 }
 
 const SCHEME_DEFAULTS: ToolVisual[] = [
-  { gamma: 1, brightness: 0, contrast: 0, red: 128, green: 128, blue: 128, night: false, nightBrightness: 0, nightGray: 0, nightContrast: 0, bigMap: false, hotkey: "F2", screen: 1 },
-  { gamma: 1.3, brightness: 6, contrast: 4, red: 128, green: 128, blue: 128, night: true, nightBrightness: 37, nightGray: 30, nightContrast: 0, bigMap: false, hotkey: "F3", screen: 1 },
-  { gamma: 1.55, brightness: 55, contrast: 21, red: 128, green: 128, blue: 128, night: true, nightBrightness: 0, nightGray: 101, nightContrast: 54, bigMap: false, hotkey: "F4", screen: 1 },
-  { gamma: 2.4, brightness: 55, contrast: 22, red: 128, green: 128, blue: 128, night: true, nightBrightness: 66, nightGray: 48, nightContrast: 58, bigMap: false, hotkey: "F5", screen: 1 },
-  { gamma: 2.9, brightness: 100, contrast: 37, red: 128, green: 128, blue: 128, night: true, nightBrightness: 93, nightGray: 46, nightContrast: 60, bigMap: false, hotkey: "F6", screen: 1 },
+  {
+    gamma: 1,
+    brightness: 0,
+    contrast: 0,
+    red: 128,
+    green: 128,
+    blue: 128,
+    night: false,
+    nightBrightness: 0,
+    nightGray: 0,
+    nightContrast: 0,
+    bigMap: false,
+    hotkey: "F2",
+    screen: 1,
+  },
+  {
+    gamma: 1.3,
+    brightness: 6,
+    contrast: 4,
+    red: 128,
+    green: 128,
+    blue: 128,
+    night: true,
+    nightBrightness: 37,
+    nightGray: 30,
+    nightContrast: 0,
+    bigMap: false,
+    hotkey: "F3",
+    screen: 1,
+  },
+  {
+    gamma: 1.55,
+    brightness: 55,
+    contrast: 21,
+    red: 128,
+    green: 128,
+    blue: 128,
+    night: true,
+    nightBrightness: 0,
+    nightGray: 101,
+    nightContrast: 54,
+    bigMap: false,
+    hotkey: "F4",
+    screen: 1,
+  },
+  {
+    gamma: 2.4,
+    brightness: 55,
+    contrast: 22,
+    red: 128,
+    green: 128,
+    blue: 128,
+    night: true,
+    nightBrightness: 66,
+    nightGray: 48,
+    nightContrast: 58,
+    bigMap: false,
+    hotkey: "F5",
+    screen: 1,
+  },
+  {
+    gamma: 2.9,
+    brightness: 100,
+    contrast: 37,
+    red: 128,
+    green: 128,
+    blue: 128,
+    night: true,
+    nightBrightness: 93,
+    nightGray: 46,
+    nightContrast: 60,
+    bigMap: false,
+    hotkey: "F6",
+    screen: 1,
+  },
 ];
 
 function readVisual(): ToolVisual {
-  const num = (id: string) => Number((document.querySelector(`#${id}`) as HTMLInputElement | null)?.value || 0);
+  const num = (id: string) =>
+    Number((document.querySelector(`#${id}`) as HTMLInputElement | null)?.value || 0);
   const current = toolState?.schemes[toolState.active]?.visual;
   return {
     gamma: num("vis-gamma"),
@@ -2045,20 +3100,24 @@ function readVisual(): ToolVisual {
 }
 
 function selectedScreens(): number[] {
-  return [1, 2].filter((screen) => document.querySelector<HTMLInputElement>(`#screen-${screen}`)?.checked);
+  return [1, 2].filter(
+    (screen) => document.querySelector<HTMLInputElement>(`#screen-${screen}`)?.checked,
+  );
 }
 
 function paintTools(state: ToolState) {
   toolState = state;
   const host = document.querySelector("#scheme-buttons");
   if (!host) return;
-  host.innerHTML = state.schemes.map((item, index) => {
-    const listening = hotkeyCapture?.kind === "scheme" && hotkeyCapture.index === index;
-    return `<div class="scheme-line">
+  host.innerHTML = state.schemes
+    .map((item, index) => {
+      const listening = hotkeyCapture?.kind === "scheme" && hotkeyCapture.index === index;
+      return `<div class="scheme-line">
       <button type="button" data-scheme="${index}" class="${index === state.active ? "on" : ""}">${item.name}</button>
       <button type="button" data-hotkey="scheme" data-scheme-key="${index}">${listening ? "请设置快捷键" : `快捷键：${item.visual.hotkey}`}</button>
     </div>`;
-  }).join("");
+    })
+    .join("");
   const visual = state.schemes[state.active]?.visual;
   if (!visual) return;
   const set = (id: string, value: number) => {
@@ -2089,7 +3148,9 @@ function paintTools(state: ToolState) {
     fitToggle.setAttribute("aria-pressed", state.fitness.enabled ? "true" : "false");
   }
   const fitKey = document.querySelector("#fit-hotkey");
-  if (fitKey) fitKey.textContent = hotkeyCapture?.kind === "fitness" ? "请设置快捷键" : `快捷键：${state.fitness.hotkey}`;
+  if (fitKey)
+    fitKey.textContent =
+      hotkeyCapture?.kind === "fitness" ? "请设置快捷键" : `快捷键：${state.fitness.hotkey}`;
   document.querySelectorAll<HTMLInputElement>("[data-delay]").forEach((input) => {
     input.value = String(state.fitness.delays[Number(input.dataset.delay)] ?? "");
   });
@@ -2100,8 +3161,12 @@ function paintTools(state: ToolState) {
 function collectTools(): ToolState | null {
   if (!toolState) return null;
   const visual = readVisual();
-  const schemes = toolState.schemes.map((item, index) => index === toolState!.active ? { ...item, visual } : item);
-  const delays = [...document.querySelectorAll<HTMLInputElement>("[data-delay]")].map((input) => Number(input.value) || 0);
+  const schemes = toolState.schemes.map((item, index) =>
+    index === toolState!.active ? { ...item, visual } : item,
+  );
+  const delays = [...document.querySelectorAll<HTMLInputElement>("[data-delay]")].map(
+    (input) => Number(input.value) || 0,
+  );
   return {
     schemes,
     active: toolState.active,
@@ -2116,18 +3181,83 @@ function collectTools(): ToolState | null {
   };
 }
 
+function setToolsLoadState(state: "loading" | "ready" | "error") {
+  const host = document.querySelector<HTMLElement>(".tools-page");
+  if (!host) return;
+  const retry = host.querySelector<HTMLButtonElement>("#tools-retry");
+  for (const control of host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+    "button, input",
+  )) {
+    if (control === retry) continue;
+    control.disabled = state !== "ready";
+  }
+  if (retry) {
+    retry.hidden = state !== "error";
+    retry.disabled = state !== "error";
+  }
+}
+
+function saveTools(next: ToolState, apply: boolean, noteSelector = "#fit-note") {
+  const token = ++toolSaveToken;
+  toolState = next;
+  paintTools(next);
+  const task = toolSaveQueue.then(async () => {
+    try {
+      const saved = await invoke<ToolState>("miaomiao_save", { state: next, apply });
+      if (token === toolSaveToken) paintTools(saved);
+      return saved;
+    } catch (reason) {
+      if (token === toolSaveToken) {
+        const actual = await invoke<ToolState>("miaomiao_get").catch(() => null);
+        if (actual) paintTools(actual);
+        else {
+          toolState = null;
+          setToolsLoadState("error");
+        }
+        const note = document.querySelector(noteSelector);
+        if (note) note.textContent = failText(reason, "保存设置失败");
+      }
+      return null;
+    }
+  });
+  toolSaveQueue = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
+}
+
 async function mountTools() {
-  const state = await invoke<ToolState>("miaomiao_get").catch(() => null);
-  if (state) paintTools(state);
+  const token = ++toolLoadToken;
+  setToolsLoadState("loading");
+  const note = document.querySelector("#fit-note");
+  if (note) note.textContent = "正在读取设置…";
+  try {
+    const state = await invoke<ToolState>("miaomiao_get");
+    if (token !== toolLoadToken || !document.querySelector("#scheme-buttons")) return;
+    toolState = state;
+    paintTools(state);
+    setToolsLoadState("ready");
+  } catch (reason) {
+    if (token !== toolLoadToken) return;
+    toolState = null;
+    setToolsLoadState("error");
+    const status = document.querySelector("#fit-note");
+    if (status) status.textContent = failText(reason, "无法读取设置，请重试");
+  }
 }
 
 async function refreshSettings() {
+  const shotToken = shotSaveToken;
   const saved = await invoke<ShotSettings>("shot_settings_get").catch(() => null);
-  if (saved) {
-    rememberShotSettings(saved);
+  if (saved && shotToken === shotSaveToken) {
+    rememberSavedShotSettings(saved);
     window.dispatchEvent(new CustomEvent("zhange-shot-settings", { detail: shotSettings }));
   }
-  const paths = await invoke<{ screenshotDir: string; logDir: string }>("paths_get").catch(() => ({ screenshotDir: "", logDir: "" }));
+  const paths = await invoke<{ screenshotDir: string; logDir: string }>("paths_get").catch(() => ({
+    screenshotDir: "",
+    logDir: "",
+  }));
   const shots = document.querySelector<HTMLInputElement>("#shot-path");
   const logs = document.querySelector<HTMLInputElement>("#log-path");
   if (shots) shots.value = paths.screenshotDir;
@@ -2138,17 +3268,27 @@ async function setGameMode(mode: "pvp" | "pve") {
   if (mode === gameMode) return;
   gameMode = mode;
   localStorage.setItem("zhange.guides.tarkov.gameMode", mode);
-  await invoke("site_set_game_mode", { mode }).catch(() => undefined);
-  resetMapBoard();
+  mapsRequestSeq += 1;
   mapsLoaded = false;
   mapsLoading = false;
   maps = [];
+  mapsNote = "正在读取地图";
+  await invoke("site_set_game_mode", { mode }).catch(() => undefined);
+  resetMapBoard();
   clearMapTasks();
   discardMapPage();
   render();
 }
 
-type LogWatch = { kind: string; slug: string; mode: string; questKind: string; taskId: string; phase?: string; raidId?: string };
+type LogWatch = {
+  kind: string;
+  slug: string;
+  mode: string;
+  questKind: string;
+  taskId: string;
+  phase?: string;
+  raidId?: string;
+};
 
 function raidPhase(kind: string) {
   return kind === "match_found" || kind === "raid_starting" || kind === "raid_started";
@@ -2195,28 +3335,70 @@ function queueRaidNav(next: "picker" | "raid") {
 }
 
 async function onLogWatch(event: LogWatch) {
+  const questContext =
+    event.kind === "quest"
+      ? {
+          accountEpoch: currentTaskProgressAccountEpoch(),
+          mode: event.mode === "pve" || event.mode === "pvp" ? event.mode : gameMode,
+        }
+      : null;
   if (event.kind === "phase" || event.kind === "map" || event.kind === "raid-end") {
-    noteLocalPhase(event.kind === "raid-end" ? { kind: "raid_exited" } : { kind: event.phase, mapId: event.slug });
+    noteLocalPhase(
+      event.kind === "raid-end"
+        ? { kind: "raid_exited" }
+        : { kind: event.phase, mapId: event.slug },
+    );
     if (event.kind === "raid-end") noteGame({ inRaid: false, phase: "raid_exited" });
     else noteGame({ slug: event.slug, phase: event.phase });
     syncLocalWatch();
     if (onMapPicker()) refreshMapBoard();
   }
-  if (event.kind === "raid-end" || event.phase === "raid_exited" || event.phase === "matching_aborted") {
+  if (
+    event.kind === "raid-end" ||
+    event.phase === "raid_exited" ||
+    event.phase === "matching_aborted"
+  ) {
     queueRaidNav("picker");
   } else if (gameInRaid) {
     queueRaidNav("raid");
   }
   const state = await ensureOverlayState();
-  if (event.kind === "map" && event.slug && state?.autoFollow !== false && room.id && path() !== "/登录" && !sameMap(liveMapSlug(), event.slug)) {
+  if (
+    event.kind === "map" &&
+    event.slug &&
+    state?.autoFollow !== false &&
+    room.id &&
+    path() !== "/登录" &&
+    !sameMap(liveMapSlug(), event.slug)
+  ) {
     gameMapSlug = event.slug;
     if (gameInRaid) void switchRoomMap(event.slug);
   }
   if (event.kind === "mode" && (event.mode === "pvp" || event.mode === "pve")) {
     void setGameMode(event.mode);
   }
-  if (event.kind === "quest" && (event.questKind === "started" || event.questKind === "failed" || event.questKind === "completed") && event.taskId) {
-    void applyLoggedQuest(event.questKind, event.taskId).then(() => patchLoggedQuest(event.questKind as "started" | "failed" | "completed", event.taskId));
+  if (
+    event.kind === "quest" &&
+    (event.questKind === "started" ||
+      event.questKind === "failed" ||
+      event.questKind === "completed") &&
+    event.taskId
+  ) {
+    void applyLoggedQuest(event.questKind, event.taskId, questContext || undefined).then((mode) => {
+      if (
+        mode &&
+        questContext &&
+        taskProgressAccountEpochIsCurrent(questContext.accountEpoch) &&
+        mode === gameMode
+      ) {
+        const patched = patchLoggedQuest(
+          event.questKind as "started" | "failed" | "completed",
+          event.taskId,
+          mode,
+        );
+        if (!patched) syncMapRoomTaskProgress(mode);
+      }
+    });
   }
 }
 
@@ -2232,7 +3414,8 @@ function applyLogSnap(snap: LogLive) {
   if (snap.phase || snap.slug) noteLocalPhase({ kind: snap.phase, mapId: snap.slug });
   noteGame({ inRaid: snap.inRaid, slug: snap.slug, phase: snap.phase });
   syncLocalWatch();
-  if (snap.mode) void onLogWatch({ kind: "mode", slug: "", mode: snap.mode, questKind: "", taskId: "" });
+  if (snap.mode)
+    void onLogWatch({ kind: "mode", slug: "", mode: snap.mode, questKind: "", taskId: "" });
   if (gameInRaid) openLiveRaidMap();
   else if (onMapPicker()) refreshMapBoard();
 }
@@ -2249,13 +3432,32 @@ async function pullLogSnap() {
 }
 
 async function boot() {
-  setLobbyRoomKeep((id) => Boolean(id && room.id === id && (room.slug || room.detail?.mapSlug || "").trim()));
+  if (!overlayView()) {
+    await listen("site-session-invalidated", () => {
+      resetTaskProgressAccountState();
+      clearRoomLocal();
+      viewerId = 0;
+      viewerName = "";
+      if (path() !== "/登录") replaceNav(encodeURI("/登录"));
+      render();
+    }).catch(() => undefined);
+  }
+  setLobbyRoomKeep((id) =>
+    Boolean(
+      id && sameRoomIdentity(room.id, id) && (room.slug || room.detail?.mapSlug || "").trim(),
+    ),
+  );
   window.addEventListener("zhange-drop-room", (event) => {
     const id = (event as CustomEvent<{ id?: string }>).detail?.id || "";
-    if (id && room.id === id) clearRoomLocal();
+    if (id && sameRoomIdentity(room.id, id)) clearRoomLocal();
   });
   startPlayerSync();
-  void invoke<ShotSettings>("shot_settings_get").then((saved) => rememberShotSettings(saved)).catch(() => undefined);
+  const shotToken = shotSaveToken;
+  void invoke<ShotSettings>("shot_settings_get")
+    .then((saved) => {
+      if (shotToken === shotSaveToken) rememberSavedShotSettings(saved);
+    })
+    .catch(() => undefined);
   if (bootOverlayShell()) return;
   document.addEventListener("fullscreenchange", () => {
     const button = document.querySelector("#map-fullscreen");
@@ -2271,7 +3473,9 @@ async function boot() {
     paintMapPickGoon();
   });
   watchOverlayTyping();
-  void listen<Record<string, unknown>>("room-sync", (event) => onRoomSync(event.payload)).catch(() => undefined);
+  void listen<Record<string, unknown>>("room-sync", (event) => onRoomSync(event.payload)).catch(
+    () => undefined,
+  );
   void listen<ToolState>("miaomiao-active", (event) => {
     if (document.querySelector("#scheme-buttons")) paintTools(event.payload);
   }).catch(() => undefined);
@@ -2281,8 +3485,10 @@ async function boot() {
     if (detail?.code) void joinRoom(detail.code, detail.password || "");
   });
   window.addEventListener("zhange-public-room", (event) => {
-    const detail = (event as CustomEvent<{ title?: string; listed?: boolean; password?: string }>).detail;
-    if (detail) void createPublicRoom(detail.title || "", detail.listed !== false, detail.password || "");
+    const detail = (event as CustomEvent<{ title?: string; listed?: boolean; password?: string }>)
+      .detail;
+    if (detail)
+      void createPublicRoom(detail.title || "", detail.listed !== false, detail.password || "");
   });
   window.addEventListener("zhange-wiki", (event) => {
     const detail = (event as CustomEvent<{ kind?: string; id?: string }>).detail;
@@ -2321,15 +3527,31 @@ document.addEventListener("click", (event) => {
       }
       clearRoomLocal();
     }
-    if (openKeyList(href) || openHideoutList(href)) return;
+    if (
+      handleLoadedListLink(
+        href,
+        "/主菜单/逃离塔科夫/钥匙管理",
+        "#keys",
+        () => import("./keys"),
+        (module, nextHref) => module.openKeyList(nextHref),
+      ) ||
+      handleLoadedListLink(
+        href,
+        "/主菜单/逃离塔科夫/藏身处",
+        "#hideout",
+        () => import("./hideout"),
+        (module, nextHref) => module.openHideoutList(nextHref),
+      )
+    )
+      return;
     go(href);
     return;
   }
   const mapButton = target.closest<HTMLButtonElement>("[data-map]");
   if (mapButton?.dataset.map) {
     const slug = mapButton.dataset.map;
-    if (room.id && slug !== (room.detail?.mapSlug || room.slug)) {
-      void switchRoomMap(slug);
+    if (room.id && !sameMap(slug, roomViewSlug())) {
+      void selectRoomViewMap(slug);
       return;
     }
     if (!room.id && (slug !== lastMapSlug || room.error)) {
@@ -2345,12 +3567,23 @@ document.addEventListener("click", (event) => {
   if (catalogButton && !catalogButton.hasAttribute("data-catalog-page")) {
     const slug = catalogButton.dataset.catalog || "";
     const child = catalogButton.dataset.catalogChild || "";
-    const next = slug ? `/主菜单/逃离塔科夫/物品图鉴/${slug}${child ? `/${child}` : ""}` : "/主菜单/逃离塔科夫/物品图鉴";
+    const next = slug
+      ? `/主菜单/逃离塔科夫/物品图鉴/${slug}${child ? `/${child}` : ""}`
+      : "/主菜单/逃离塔科夫/物品图鉴";
     if (document.querySelector("#catalog")) {
-      pinCatalogList(catalogButton.dataset.catalogNode || "all");
       const url = encodeURI(next);
       if (location.pathname + location.search !== url) pushNav(url);
-      void mountCatalog({ slug, child });
+      const ticket = pageLoadGuard.begin(routeKey());
+      loadPageModule(
+        ticket,
+        () => import("./itemCatalog"),
+        ({ mountCatalog, pinCatalogList }) => {
+          pinCatalogList(catalogButton.dataset.catalogNode || "all");
+          void mountCatalog({ slug, child });
+        },
+        "#catalog",
+        "物品图鉴加载失败，请重新进入此页面。",
+      );
       return;
     }
     go(next);
@@ -2402,6 +3635,16 @@ document.addEventListener("click", (event) => {
     render();
     return;
   }
+  if (target.closest("[data-map-retry]")) {
+    mapsLoaded = false;
+    mapsNote = "正在读取地图";
+    void loadMaps();
+    return;
+  }
+  if (target.closest("[data-room-board-retry]")) {
+    void retryMapBoard({ roomId: room.id, viewerId, viewerName }, maps).then(() => render());
+    return;
+  }
   const modeButton = target.closest<HTMLButtonElement>("[data-mode]");
   if (modeButton?.dataset.mode === "pvp" || modeButton?.dataset.mode === "pve") {
     void setGameMode(modeButton.dataset.mode);
@@ -2426,8 +3669,8 @@ document.addEventListener("click", (event) => {
   if (locate?.dataset.locateTask && locate.dataset.locateMap) {
     sessionStorage.setItem("zhange.locateTask", locate.dataset.locateTask);
     const slug = locate.dataset.locateMap;
-    if (room.id && slug !== (room.detail?.mapSlug || room.slug)) {
-      void switchRoomMap(slug);
+    if (room.id && !sameMap(slug, roomViewSlug())) {
+      void selectRoomViewMap(slug);
       return;
     }
     lastMapSlug = slug;
@@ -2464,7 +3707,9 @@ document.addEventListener("click", (event) => {
   const collapse = target.closest<HTMLButtonElement>("[data-collapse]");
   if (collapse?.dataset.collapse) {
     document.querySelector(`#${collapse.dataset.collapse}-panel`)?.classList.add("collapsed");
-    document.querySelector<HTMLElement>(`[data-expand="${collapse.dataset.collapse}"]`)?.removeAttribute("hidden");
+    document
+      .querySelector<HTMLElement>(`[data-expand="${collapse.dataset.collapse}"]`)
+      ?.removeAttribute("hidden");
     syncMapDock();
     return;
   }
@@ -2516,10 +3761,14 @@ function setMapSidebars(open: boolean) {
 async function onRoomAction(action: string, button: HTMLButtonElement) {
   if (action === "copy") {
     if (!room.id) return;
-    const text = room.password ? `房间 ${roomCode(room.id)} 密码 ${room.password}` : roomCode(room.id);
+    const text = room.password
+      ? `房间 ${roomCode(room.id)} 密码 ${room.password}`
+      : roomCode(room.id);
     await navigator.clipboard.writeText(text).catch(() => undefined);
     button.textContent = "已复制";
-    window.setTimeout(() => { button.textContent = "复制编号"; }, 1200);
+    window.setTimeout(() => {
+      button.textContent = "复制编号";
+    }, 1200);
     return;
   }
   if (action === "maps") {
@@ -2529,12 +3778,19 @@ async function onRoomAction(action: string, button: HTMLButtonElement) {
   if (action === "leave") {
     const id = room.id;
     exitToLobby();
-    if (id) void invoke("site_post", { path: `/guides/tarkov/raid-rooms/${id}/leave`, body: {} }).catch(() => undefined);
+    if (id)
+      void invoke("site_post", { path: `/guides/tarkov/raid-rooms/${id}/leave`, body: {} }).catch(
+        () => undefined,
+      );
   }
 }
 
 async function joinRoom(code: string, password: string) {
   const seq = ++roomSeq;
+  roomEpoch += 1;
+  roomMapSequence += 1;
+  roomDetailRevision += 1;
+  claimSeedKey = "";
   ignoredRoomId = "";
   roomPending = true;
   room = { slug: "", id: code, status: "正在加入房间…", error: "", password, detail: null };
@@ -2542,10 +3798,14 @@ async function joinRoom(code: string, password: string) {
   resetMapBoard();
   go("/主菜单/逃离塔科夫/实时地图");
   try {
-    const data = await withTimeout(invoke<Record<string, unknown>>("site_post", {
-      path: `/guides/tarkov/raid-rooms/${encodeURIComponent(code)}/join`,
-      body: password ? { game_mode: gameMode, password } : { game_mode: gameMode },
-    }), 30000, "加入房间超时，请再试一次");
+    const data = await withTimeout(
+      invoke<Record<string, unknown>>("site_post", {
+        path: `/guides/tarkov/raid-rooms/${encodeURIComponent(code)}/join`,
+        body: password ? { game_mode: gameMode, password } : { game_mode: gameMode },
+      }),
+      30000,
+      "加入房间超时，请再试一次",
+    );
     if (seq !== roomSeq) return;
     const detail = readDetail(data);
     if (!detail) throw new Error("没有返回房间信息");
@@ -2578,7 +3838,8 @@ document.addEventListener("keydown", (event) => {
   if (onOverlayKey(event)) return;
   if (!hotkeyCapture || !toolState) return;
   event.preventDefault();
-  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key.toUpperCase().replace(" ", "");
+  const key =
+    event.key.length === 1 ? event.key.toUpperCase() : event.key.toUpperCase().replace(" ", "");
   if (key === "ESCAPE") {
     hotkeyCapture = null;
     paintTools(toolState);
@@ -2592,8 +3853,9 @@ document.addEventListener("keydown", (event) => {
   } else {
     next.fitness.hotkey = key;
   }
+  const noteSelector = hotkeyCapture.kind === "fitness" ? "#fit-note" : "#visual-note";
   hotkeyCapture = null;
-  void invoke<ToolState>("miaomiao_save", { state: next, apply: false }).then((saved) => paintTools(saved));
+  void saveTools(next, false, noteSelector);
 });
 
 document.addEventListener("input", (event) => {
@@ -2621,7 +3883,9 @@ document.addEventListener("change", (event) => {
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "shot-auto") {
-    void saveShotSettings(target.checked ? { autoEnabled: true, pruneEnabled: true } : { autoEnabled: false });
+    void saveShotSettings(
+      target.checked ? { autoEnabled: true, pruneEnabled: true } : { autoEnabled: false },
+    );
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "shot-prune") {
@@ -2643,17 +3907,14 @@ document.addEventListener("change", (event) => {
     if (slug) void publishOverlayMap(slug);
     return;
   }
-  if (event.target instanceof HTMLInputElement && (event.target.id === "screen-1" || event.target.id === "screen-2") && toolState) {
+  if (
+    event.target instanceof HTMLInputElement &&
+    (event.target.id === "screen-1" || event.target.id === "screen-2") &&
+    toolState
+  ) {
     const next = collectTools();
     if (!next) return;
-    void invoke<ToolState>("miaomiao_save", { state: next, apply: true }).then((saved) => {
-      paintTools(saved);
-      const note = document.querySelector("#visual-note");
-      if (note) note.textContent = saved.status === "色彩已激活" ? "已应用" : saved.status;
-    }).catch((reason: unknown) => {
-      const note = document.querySelector("#visual-note");
-      if (note) note.textContent = failText(reason, "应用失败");
-    });
+    void saveTools(next, true, "#visual-note");
     return;
   }
   if (event.target instanceof HTMLSelectElement && event.target.id === "scheme-list" && toolState) {
@@ -2661,7 +3922,12 @@ document.addEventListener("change", (event) => {
     paintTools(toolState);
     return;
   }
-  if (onTaskChange(event.target) || onMapObjectiveChange(event.target) || onMapTaskChange(event.target)) event.stopPropagation();
+  if (
+    onTaskChange(event.target) ||
+    onMapObjectiveChange(event.target) ||
+    onMapTaskChange(event.target)
+  )
+    event.stopPropagation();
 });
 
 document.addEventListener("submit", (event) => {
@@ -2677,7 +3943,7 @@ document.addEventListener("submit", (event) => {
     return;
   }
   if (form.id === "tavern-comment") {
-    const slug = tavernMatch(path());
+    const slug = tavernMatch(location.pathname);
     if (slug?.kind === "article") void submitTavernComment(slug.slug, form);
     return;
   }
@@ -2689,15 +3955,28 @@ document.addEventListener("submit", (event) => {
     if (error) error.textContent = "请填写账号和密码";
     return;
   }
+  resetTaskProgressAccountState();
+  clearRoomLocal();
+  viewerId = 0;
+  viewerName = "";
   if (error) error.textContent = "正在登录…";
-  void invoke("site_login", { username: account, password }).then(() => go("/主菜单")).catch((reason: unknown) => {
-    if (error) error.textContent = reasonText(reason);
-  });
+  void invoke("site_login", { username: account, password })
+    .then(async () => {
+      if (!(await loggedIn())) throw new Error("登录状态未生效，请重试");
+      go("/主菜单");
+    })
+    .catch((reason: unknown) => {
+      if (error) error.textContent = reasonText(reason);
+    });
 });
 
 document.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
+  if (target.closest("#tools-retry")) {
+    void mountTools();
+    return;
+  }
   const pick = target.closest<HTMLButtonElement>("[data-pick]");
   const open = target.closest<HTMLButtonElement>("[data-open]");
   if (pick?.dataset.pick) {
@@ -2715,12 +3994,16 @@ document.addEventListener("click", (event) => {
       const logInput = document.querySelector<HTMLInputElement>("#log-path");
       if (shotInput) shotInput.value = next.screenshotDir;
       if (logInput) logInput.value = next.logDir;
-    })();
+    })().catch((reason: unknown) => {
+      const note = document.querySelector("#path-note");
+      if (note) note.textContent = failText(reason, "保存目录失败");
+    });
   }
   if (open?.dataset.open) {
-    const value = open.dataset.open === "screenshots"
-      ? document.querySelector<HTMLInputElement>("#shot-path")?.value || ""
-      : document.querySelector<HTMLInputElement>("#log-path")?.value || "";
+    const value =
+      open.dataset.open === "screenshots"
+        ? document.querySelector<HTMLInputElement>("#shot-path")?.value || ""
+        : document.querySelector<HTMLInputElement>("#log-path")?.value || "";
     void invoke("paths_open", { path: value }).catch((reason: unknown) => {
       const note = document.querySelector("#path-note");
       if (note) note.textContent = reason instanceof Error ? reason.message : "无法打开目录";
@@ -2751,9 +4034,13 @@ document.addEventListener("click", (event) => {
     setLayerVisible(layerToggle.dataset.layer || "", layerToggle.checked);
     const mapSlug = document.querySelector("#map-root")?.getAttribute("data-slug") || "";
     if (mapSlug) void publishOverlayMap(mapSlug);
-    const parent = layerToggle.closest(".filter-block")?.querySelector<HTMLInputElement>("[data-group]");
+    const parent = layerToggle
+      .closest(".filter-block")
+      ?.querySelector<HTMLInputElement>("[data-group]");
     if (parent?.dataset.group) {
-      parent.checked = parent.dataset.group.split(",").every((key) => document.querySelector<HTMLInputElement>(`[data-layer="${key}"]`)?.checked);
+      parent.checked = parent.dataset.group
+        .split(",")
+        .every((key) => document.querySelector<HTMLInputElement>(`[data-layer="${key}"]`)?.checked);
     }
     return;
   }
@@ -2774,9 +4061,10 @@ document.addEventListener("click", (event) => {
   if (target.closest("#visual-toggle") || target.closest("#fit-toggle")) {
     const next = collectTools();
     if (!next) return;
-    if (target.closest("#visual-toggle")) next.visualEnabled = !next.visualEnabled;
-    if (target.closest("#fit-toggle")) next.fitness.enabled = !next.fitness.enabled;
-    void invoke<ToolState>("miaomiao_save", { state: next, apply: false }).then((saved) => paintTools(saved));
+    const visual = Boolean(target.closest("#visual-toggle"));
+    if (visual) next.visualEnabled = !next.visualEnabled;
+    else next.fitness.enabled = !next.fitness.enabled;
+    void saveTools(next, false, visual ? "#visual-note" : "#fit-note");
     return;
   }
   const schemeButton = target.closest<HTMLButtonElement>("[data-scheme]");
@@ -2784,13 +4072,10 @@ document.addEventListener("click", (event) => {
     const next = collectTools();
     if (!next) return;
     next.active = Number(schemeButton.dataset.scheme);
-    void invoke<ToolState>("miaomiao_save", { state: next, apply: true }).then((saved) => {
-      paintTools(saved);
+    void saveTools(next, true, "#visual-note").then((saved) => {
+      if (!saved) return;
       const note = document.querySelector("#visual-note");
       if (note) note.textContent = saved.status === "色彩已激活" ? "已应用" : saved.status;
-    }).catch((reason: unknown) => {
-      const note = document.querySelector("#visual-note");
-      if (note) note.textContent = failText(reason, "应用失败");
     });
     return;
   }
@@ -2812,13 +4097,10 @@ document.addEventListener("click", (event) => {
   if (target.closest("#scheme-save")) {
     const next = collectTools();
     if (!next) return;
-    void invoke<ToolState>("miaomiao_save", { state: next, apply: true }).then((saved) => {
-      paintTools(saved);
+    void saveTools(next, true, "#visual-note").then((saved) => {
+      if (!saved) return;
       const note = document.querySelector("#visual-note");
       if (note) note.textContent = saved.status === "色彩已激活" ? "方案已保存" : saved.status;
-    }).catch((reason: unknown) => {
-      const note = document.querySelector("#visual-note");
-      if (note) note.textContent = failText(reason, "保存失败");
     });
     return;
   }
@@ -2828,17 +4110,37 @@ document.addEventListener("click", (event) => {
     const base = SCHEME_DEFAULTS[next.active];
     if (!base || !next.schemes[next.active]) return;
     next.schemes[next.active].visual = { ...base, hotkey: next.schemes[next.active].visual.hotkey };
-    void invoke<ToolState>("miaomiao_save", { state: next, apply: false }).then((saved) => paintTools(saved));
+    void saveTools(next, false, "#visual-note");
     return;
   }
   if (target.closest("#fit-save")) {
     const next = collectTools();
     if (!next) return;
-    void invoke<ToolState>("miaomiao_save", { state: next, apply: false }).then((saved) => paintTools(saved));
+    void saveTools(next, false, "#fit-note");
     return;
   }
   if (target.closest("#fit-reset")) {
-    void invoke<ToolState>("miaomiao_restore_delays").then((saved) => paintTools(saved));
+    const token = ++toolSaveToken;
+    const task = toolSaveQueue.then(async () => {
+      try {
+        const saved = await invoke<ToolState>("miaomiao_restore_delays");
+        if (token === toolSaveToken) paintTools(saved);
+      } catch (reason) {
+        if (token !== toolSaveToken) return;
+        const actual = await invoke<ToolState>("miaomiao_get").catch(() => null);
+        if (actual) paintTools(actual);
+        else {
+          toolState = null;
+          setToolsLoadState("error");
+        }
+        const note = document.querySelector("#fit-note");
+        if (note) note.textContent = failText(reason, "恢复默认延迟失败");
+      }
+    });
+    toolSaveQueue = task.then(
+      () => undefined,
+      () => undefined,
+    );
     return;
   }
   if (target.closest("#log-sync")) {
@@ -2879,15 +4181,17 @@ document.addEventListener("click", (event) => {
   if (target.closest("#detect-paths")) {
     const note = document.querySelector("#path-note");
     if (note) note.textContent = "正在检测…";
-    void invoke<{ screenshotDir: string; logDir: string; message: string }>("paths_detect").then((found) => {
-      const shotInput = document.querySelector<HTMLInputElement>("#shot-path");
-      const logInput = document.querySelector<HTMLInputElement>("#log-path");
-      if (shotInput) shotInput.value = found.screenshotDir;
-      if (logInput) logInput.value = found.logDir;
-      if (note) note.textContent = found.message;
-    }).catch((reason: unknown) => {
-      if (note) note.textContent = reason instanceof Error ? reason.message : "检测失败";
-    });
+    void invoke<{ screenshotDir: string; logDir: string; message: string }>("paths_detect")
+      .then((found) => {
+        const shotInput = document.querySelector<HTMLInputElement>("#shot-path");
+        const logInput = document.querySelector<HTMLInputElement>("#log-path");
+        if (shotInput) shotInput.value = found.screenshotDir;
+        if (logInput) logInput.value = found.logDir;
+        if (note) note.textContent = found.message;
+      })
+      .catch((reason: unknown) => {
+        if (note) note.textContent = reason instanceof Error ? reason.message : "检测失败";
+      });
   }
 });
 
